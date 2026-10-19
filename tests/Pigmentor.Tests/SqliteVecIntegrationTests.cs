@@ -52,7 +52,8 @@ public sealed class SqliteVecIntegrationTests : IDisposable
         int fiscalYear = 2024,
         string text = "Sample text",
         string confidentiality = "Internal",
-        string title = "Sample Title")
+        string title = "Sample Title",
+        string embeddingModel = "test-embed-model")
     {
         var metadata = new DocumentMetadata(
             Id: docId,
@@ -75,13 +76,18 @@ public sealed class SqliteVecIntegrationTests : IDisposable
             EndCharOffset: text.Length,
             Metadata: metadata);
 
-        return new EmbeddedChunk(docChunk, vector, "test-embed-model");
+        return new EmbeddedChunk(docChunk, vector, embeddingModel);
     }
 
     [Fact]
     public async Task NearestNeighborOrdering_ReturnsClosestVectorsFirst()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         // Vector pointing along X-axis
         var query = new float[] { 1f, 0f };
@@ -118,13 +124,23 @@ public sealed class SqliteVecIntegrationTests : IDisposable
         var c1 = CreateChunk("c1", "doc1", [0.6f, 0.8f], text: "Persisted Text", title: "Original Title");
 
         // Write with first store instance and dispose
-        using (var store1 = new SqliteVecStore(_connectionString, dimensions: 2))
+        using (var store1 = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        }))
         {
             await store1.UpsertAsync([c1]);
         }
 
-        // Reopen with second store instance (dimension inferred or explicit)
-        using (var store2 = new SqliteVecStore(_connectionString, dimensions: 2))
+        // Reopen with second store instance (explicit dimensions and model)
+        using (var store2 = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        }))
         {
             var results = await store2.SearchAsync(new float[] { 0.6f, 0.8f }, topK: 1);
 
@@ -139,7 +155,12 @@ public sealed class SqliteVecIntegrationTests : IDisposable
     [Fact]
     public async Task UpsertIdempotency_UpdatesExistingChunkWithoutDuplication()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         var initial = CreateChunk("c1", "doc1", [1f, 0f], text: "Initial Content", department: "Engineering");
         await store.UpsertAsync([initial]);
@@ -165,7 +186,12 @@ public sealed class SqliteVecIntegrationTests : IDisposable
     [Fact]
     public async Task DeleteAsync_AtomicallyRemovesFromChunksAndVecChunks()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         var c1 = CreateChunk("c1", "doc1", [1f, 0f]);
         var c2 = CreateChunk("c2", "doc2", [0f, 1f]);
@@ -184,7 +210,12 @@ public sealed class SqliteVecIntegrationTests : IDisposable
     [Fact]
     public async Task MetadataPreFilterInvariant_EnsuresTopKIsNotWastedOnExcludedVectors()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         var query = new float[] { 1f, 0f };
 
@@ -197,7 +228,6 @@ public sealed class SqliteVecIntegrationTests : IDisposable
         await store.UpsertAsync([hrChunk, engChunk]);
 
         // CRITICAL: Request topK = 1 with Engineering filter.
-        // If post-filtering was used, top 1 would select hr-1 (distance 0), then discard it, yielding 0 results.
         // Pre-filtering in SQLite ensures eng-1 is selected and returned as the top result!
         var filter = MetadataFilter.Where(m => m.Department == "Engineering");
         var results = await store.SearchAsync(query, topK: 1, filter: filter);
@@ -210,7 +240,12 @@ public sealed class SqliteVecIntegrationTests : IDisposable
     [Fact]
     public async Task CompoundMetadataFilters_AndOrCombinationsWorkAccurately()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         var c1 = CreateChunk("c1", "doc1", [1f, 0f], department: "Engineering", fiscalYear: 2024);
         var c2 = CreateChunk("c2", "doc2", [1f, 0f], department: "Engineering", fiscalYear: 2022);
@@ -257,7 +292,12 @@ public sealed class SqliteVecIntegrationTests : IDisposable
     [Fact]
     public async Task SpecialCharactersAndSqlSafety_HandledSafelyViaParameters()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         var trickyAuthor = "O'Connor; DROP TABLE chunks; --";
         var trickyTitle = "Quotes \" and ' and -- comments /* test */";
@@ -288,7 +328,12 @@ public sealed class SqliteVecIntegrationTests : IDisposable
     [Fact]
     public async Task DimensionMismatch_ThrowsArgumentException()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         // Insert wrong dimensions
         var wrongChunk = CreateChunk("c_wrong", "doc1", [1f, 0f, 0.5f]); // dim 3 instead of 2
@@ -303,7 +348,12 @@ public sealed class SqliteVecIntegrationTests : IDisposable
     {
         var chunk = CreateChunk("c1", "doc1", [1f, 0f]);
 
-        using (var store1 = new SqliteVecStore(_connectionString, dimensions: 2))
+        using (var store1 = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        }))
         {
             await store1.UpsertAsync([chunk]);
         }
@@ -311,14 +361,24 @@ public sealed class SqliteVecIntegrationTests : IDisposable
         // Reopen requesting 384 dimensions on a 2-dimensional database
         Assert.Throws<InvalidOperationException>(() =>
         {
-            using var store2 = new SqliteVecStore(_connectionString, dimensions: 384);
+            using var store2 = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = _connectionString,
+                Dimensions = 384,
+                EmbeddingModel = "test-embed-model"
+            });
         });
     }
 
     [Fact]
     public async Task CancellationToken_PropagatesAndCancelsOperation()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         using var cts = new CancellationTokenSource();
         cts.Cancel();
@@ -338,7 +398,12 @@ public sealed class SqliteVecIntegrationTests : IDisposable
     [Fact]
     public async Task SearchWithMetadataFilterAll_ReturnsUnconditionalResults()
     {
-        using var store = new SqliteVecStore(_connectionString, dimensions: 2);
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
 
         var c1 = CreateChunk("c1", "doc1", [1f, 0f], department: "Engineering");
         var c2 = CreateChunk("c2", "doc2", [0f, 1f], department: "HR");
@@ -348,5 +413,248 @@ public sealed class SqliteVecIntegrationTests : IDisposable
         var results = await store.SearchAsync(new float[] { 1f, 0f }, topK: 5, filter: MetadataFilter.All);
 
         Assert.Equal(2, results.Count);
+    }
+
+    // --- Targeted Hardening Tests ---
+
+    [Fact]
+    public void ProviderBootstrap_InitializesSQLiteRuntimeBeforeOpening()
+    {
+        SqliteVecExtensionLoader.EnsureSqliteProvider();
+        Assert.True(SQLitePCL.raw.sqlite3_libversion_number() > 0);
+
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-embed-model"
+        });
+
+        Assert.Equal(2, store.Dimensions);
+        Assert.Equal("test-embed-model", store.EmbeddingModel);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void NewDatabase_WithZeroOrNegativeDimensions_ThrowsArgumentOutOfRangeException(int invalidDim)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+        {
+            using var store = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = _connectionString,
+                Dimensions = invalidDim,
+                EmbeddingModel = "test-embed-model"
+            });
+        });
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void NewDatabase_WithMissingOrEmptyEmbeddingModel_ThrowsArgumentException(string? invalidModel)
+    {
+        Assert.Throws<ArgumentException>(() =>
+        {
+            using var store = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = _connectionString,
+                Dimensions = 2,
+                EmbeddingModel = invalidModel!
+            });
+        });
+    }
+
+    [Fact]
+    public void EmbeddingModel_PersistedAndReopenedSuccessfully()
+    {
+        using (var store1 = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "nomic-embed-text"
+        }))
+        {
+            Assert.Equal("nomic-embed-text", store1.EmbeddingModel);
+        }
+
+        using (var store2 = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "nomic-embed-text"
+        }))
+        {
+            Assert.Equal("nomic-embed-text", store2.EmbeddingModel);
+        }
+    }
+
+    [Fact]
+    public void ReopenWithMismatchedEmbeddingModel_ThrowsInvalidOperationException()
+    {
+        using (var store1 = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "model-A"
+        }))
+        {
+        }
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var store2 = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = _connectionString,
+                Dimensions = 2,
+                EmbeddingModel = "model-B"
+            });
+        });
+
+        Assert.Contains("model-A", ex.Message);
+        Assert.Contains("model-B", ex.Message);
+    }
+
+    [Fact]
+    public async Task ChunkModelMismatch_ThrowsArgumentException()
+    {
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "model-A"
+        });
+
+        // Chunk has model-B instead of model-A
+        var mismatchedChunk = new EmbeddedChunk(
+            CreateChunk("c1", "doc1", [1f, 0f]).Chunk,
+            new float[] { 1f, 0f },
+            "model-B");
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => store.UpsertAsync([mismatchedChunk]));
+        Assert.Contains("model-A", ex.Message);
+        Assert.Contains("model-B", ex.Message);
+    }
+
+    [Fact]
+    public async Task BatchUpsert_WithModelMismatchInSubsequentChunk_LeavesDatabaseEmpty()
+    {
+        using var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "model-A"
+        });
+
+        var chunk1 = new EmbeddedChunk(CreateChunk("c1", "doc1", [1f, 0f]).Chunk, new float[] { 1f, 0f }, "model-A");
+        var chunk2 = new EmbeddedChunk(CreateChunk("c2", "doc2", [0f, 1f]).Chunk, new float[] { 0f, 1f }, "model-B");
+
+        // Upsert batch containing valid chunk1 and invalid chunk2
+        await Assert.ThrowsAsync<ArgumentException>(() => store.UpsertAsync([chunk1, chunk2]));
+
+        // Verify chunk1 was NOT written to the database (atomic)
+        var results = await store.SearchAsync(new float[] { 1f, 0f }, topK: 5);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void UnsupportedSchemaVersion_ThrowsInvalidOperationException()
+    {
+        // Create database manually with user_version = 999
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(_connectionString))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA user_version = 999;";
+            cmd.ExecuteNonQuery();
+        }
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var store = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = _connectionString,
+                Dimensions = 2,
+                EmbeddingModel = "test-embed-model"
+            });
+        });
+
+        Assert.Contains("999", ex.Message);
+        Assert.Contains("Expected version 1", ex.Message);
+    }
+
+    [Fact]
+    public void UnversionedDatabase_WithExistingPigmentorTables_ThrowsInvalidOperationException()
+    {
+        // Create an unversioned table with pigmentor tables (user_version = 0 by default)
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(_connectionString))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "CREATE TABLE chunks (id INT);";
+            cmd.ExecuteNonQuery();
+        }
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var store = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = _connectionString,
+                Dimensions = 2,
+                EmbeddingModel = "test-embed-model"
+            });
+        });
+
+        Assert.Contains("unversioned", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TrickyEmbeddingModelName_RoundTripsSafelyViaParameters()
+    {
+        var trickyModelName = "model'oops\"; DROP TABLE chunks; --";
+
+        using (var store1 = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = trickyModelName
+        }))
+        {
+            var chunk = new EmbeddedChunk(CreateChunk("c1", "doc1", [1f, 0f]).Chunk, new float[] { 1f, 0f }, trickyModelName);
+            await store1.UpsertAsync([chunk]);
+        }
+
+        // Reopen with exact tricky name
+        using (var store2 = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = trickyModelName
+        }))
+        {
+            var results = await store2.SearchAsync(new float[] { 1f, 0f }, topK: 1);
+            Assert.Single(results);
+            Assert.Equal("c1", results[0].Chunk.ChunkId);
+            Assert.Equal(trickyModelName, store2.EmbeddingModel);
+        }
+    }
+
+    [Fact]
+    public void ExplicitInvalidExtensionPath_ThrowsFileNotFoundException()
+    {
+        var invalidPath = Path.Combine(Path.GetTempPath(), $"nonexistent_{Guid.NewGuid():N}.dll");
+
+        Assert.Throws<FileNotFoundException>(() =>
+        {
+            using var store = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = _connectionString,
+                Dimensions = 2,
+                EmbeddingModel = "test-embed-model",
+                ExtensionPath = invalidPath
+            });
+        });
     }
 }

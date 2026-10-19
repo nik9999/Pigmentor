@@ -366,7 +366,7 @@ public sealed class RagPipelineTests
     [Fact]
     public async Task SqliteVecStore_ExecutesSuccessfully_WhenFilterProvided()
     {
-        using var store = new Pigmentor.VectorStore.SqliteVec.SqliteVecStore("Data Source=:memory:", dimensions: 2);
+        using var store = new Pigmentor.VectorStore.SqliteVec.SqliteVecStore("Data Source=:memory:", dimensions: 2, embeddingModel: "test-model");
         var filter = MetadataFilter.Where(m => m.Silo == "Alpha");
 
         var results = await store.SearchAsync(DummyVector, topK: 5, filter: filter);

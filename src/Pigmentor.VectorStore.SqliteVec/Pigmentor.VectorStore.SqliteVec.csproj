@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\Pigmentor.Core\Pigmentor.Core.csproj" />
@@ -7,7 +7,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.0" />
     <PackageReference Include="sqlite-vec" Version="0.1.7-alpha.2.1" />
-    <PackageReference Include="SQLitePCLRaw.provider.dynamic_cdecl" Version="2.1.11" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
   </ItemGroup>
 
   <PropertyGroup>

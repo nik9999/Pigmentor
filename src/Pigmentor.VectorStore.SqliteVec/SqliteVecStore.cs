@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Microsoft.Data.Sqlite;
 using Pigmentor.Core.Abstractions;
@@ -12,37 +13,62 @@ namespace Pigmentor.VectorStore.SqliteVec;
 /// </summary>
 public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
 {
+    public const int CurrentSchemaVersion = 1;
+
     private readonly SqliteVecStoreOptions _options;
     private readonly SqliteConnection _connection;
     private readonly SemaphoreSlim _lock = new(1, 1);
-    private int _dimensions;
-    private bool _schemaInitialized;
+    private readonly int _dimensions;
+    private readonly string _embeddingModel;
     private bool _disposed;
 
     public SqliteVecStore(SqliteVecStoreOptions options)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
-        _dimensions = options.Dimensions;
 
+        if (_options.Dimensions <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                _options.Dimensions,
+                "Vector dimensions must be greater than zero.");
+        }
+
+        if (string.IsNullOrWhiteSpace(_options.EmbeddingModel))
+        {
+            throw new ArgumentException(
+                "EmbeddingModel must be specified and non-empty in SqliteVecStoreOptions.",
+                nameof(options));
+        }
+
+        _dimensions = _options.Dimensions;
+        _embeddingModel = _options.EmbeddingModel;
+
+        // 1. Ensure SQLite native provider runtime is initialized BEFORE opening connection
+        SqliteVecExtensionLoader.EnsureSqliteProvider();
+
+        // 2. Open connection
         _connection = new SqliteConnection(_options.ConnectionString);
         _connection.Open();
 
+        // 3. Load & verify native sqlite-vec extension
         SqliteVecExtensionLoader.Load(_connection, _options.ExtensionPath);
 
+        // 4. Initialize and validate database schema and metadata
         InitializeSchema();
     }
 
     public SqliteVecStore(
         string connectionString,
-        int dimensions = 0,
-        string? extensionPath = null,
-        string? embeddingModel = null)
+        int dimensions,
+        string embeddingModel,
+        string? extensionPath = null)
         : this(new SqliteVecStoreOptions
         {
             ConnectionString = connectionString,
             Dimensions = dimensions,
-            ExtensionPath = extensionPath,
-            EmbeddingModel = embeddingModel
+            EmbeddingModel = embeddingModel,
+            ExtensionPath = extensionPath
         })
     {
     }
@@ -50,6 +76,8 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
     public string CollectionName => _options.CollectionName;
 
     public int Dimensions => _dimensions;
+
+    public string EmbeddingModel => _embeddingModel;
 
     public Task EnsureCollectionExistsAsync(CancellationToken cancellationToken = default)
     {
@@ -75,24 +103,28 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
             return;
         }
 
+        // Enforce invariants on the entire batch BEFORE acquiring transaction lock or executing writes
+        foreach (var item in chunkList)
+        {
+            if (item.Vector.Length != _dimensions)
+            {
+                throw new ArgumentException(
+                    $"Vector dimensionality mismatch for chunk '{item.Chunk.ChunkId}': expected {_dimensions}, but got {item.Vector.Length}.",
+                    nameof(chunks));
+            }
+
+            if (!string.Equals(item.EmbeddingModel, _embeddingModel, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    $"Embedding model mismatch for chunk '{item.Chunk.ChunkId}': expected '{_embeddingModel}', but got '{item.EmbeddingModel}'.",
+                    nameof(chunks));
+            }
+        }
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            if (_dimensions == 0)
-            {
-                EnsureVirtualTable(chunkList[0].Vector.Length, chunkList[0].EmbeddingModel);
-            }
-
-            foreach (var item in chunkList)
-            {
-                if (item.Vector.Length != _dimensions)
-                {
-                    throw new ArgumentException(
-                        $"Vector dimensionality mismatch for chunk '{item.Chunk.ChunkId}': expected {_dimensions}, but got {item.Vector.Length}.",
-                        nameof(chunks));
-                }
-            }
-
+            ThrowIfDisposed();
             using var transaction = _connection.BeginTransaction();
 
             using var upsertChunkCmd = _connection.CreateCommand();
@@ -173,12 +205,12 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                 pDocType.Value = m.DocumentType;
                 pFiscalYear.Value = m.FiscalYear;
                 pAuthor.Value = m.Author;
-                pLastMod.Value = m.LastModified.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+                pLastMod.Value = m.LastModified.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
                 pTitle.Value = m.Title;
                 pEmbeddingModel.Value = item.EmbeddingModel;
 
                 var rowIdObj = await upsertChunkCmd.ExecuteScalarAsync(cancellationToken);
-                var rowId = Convert.ToInt64(rowIdObj, System.Globalization.CultureInfo.InvariantCulture);
+                var rowId = Convert.ToInt64(rowIdObj, CultureInfo.InvariantCulture);
 
                 // Update vec_chunks
                 pDeleteRowId.Value = rowId;
@@ -206,21 +238,17 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
         ThrowIfDisposed();
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
 
+        if (queryVector.Length != _dimensions)
+        {
+            throw new ArgumentException(
+                $"Query vector dimensionality mismatch: expected {_dimensions}, but got {queryVector.Length}.",
+                nameof(queryVector));
+        }
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            if (_dimensions > 0 && queryVector.Length != _dimensions)
-            {
-                throw new ArgumentException(
-                    $"Query vector dimensionality mismatch: expected {_dimensions}, but got {queryVector.Length}.",
-                    nameof(queryVector));
-            }
-
-            if (!_schemaInitialized || _dimensions == 0)
-            {
-                return Array.Empty<RetrievalResult>();
-            }
-
+            ThrowIfDisposed();
             var (filterSql, filterParams) = SqliteFilterTranslator.Translate(filter?.Root);
 
             using var cmd = _connection.CreateCommand();
@@ -291,7 +319,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                 var title = reader.GetString(14);
                 var distance = reader.GetDouble(15);
 
-                var lastModified = DateOnly.TryParse(lastModifiedStr, out var d) ? d : DateOnly.MinValue;
+                var lastModified = DateOnly.TryParse(lastModifiedStr, CultureInfo.InvariantCulture, out var d) ? d : DateOnly.MinValue;
 
                 var metadata = new DocumentMetadata(
                     Id: docId,
@@ -343,6 +371,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
         await _lock.WaitAsync(cancellationToken);
         try
         {
+            ThrowIfDisposed();
             using var transaction = _connection.BeginTransaction();
 
             using var findRowIdCmd = _connection.CreateCommand();
@@ -368,7 +397,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                 var rowIdObj = await findRowIdCmd.ExecuteScalarAsync(cancellationToken);
                 if (rowIdObj != null && rowIdObj != DBNull.Value)
                 {
-                    var rowId = Convert.ToInt64(rowIdObj, System.Globalization.CultureInfo.InvariantCulture);
+                    var rowId = Convert.ToInt64(rowIdObj, CultureInfo.InvariantCulture);
 
                     pDeleteRowId.Value = rowId;
                     await deleteVecCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -388,11 +417,26 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (_disposed)
+        {
+            return;
+        }
 
-        _connection.Dispose();
-        _lock.Dispose();
+        _lock.Wait();
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _connection.Dispose();
+        }
+        finally
+        {
+            _lock.Release();
+        }
     }
 
     public ValueTask DisposeAsync()
@@ -408,20 +452,61 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
             pragmaCmd.CommandText = @"
                 PRAGMA journal_mode = WAL;
                 PRAGMA foreign_keys = ON;
-                PRAGMA user_version = 1;
             ";
             pragmaCmd.ExecuteNonQuery();
         }
 
+        int userVersion;
+        using (var versionCmd = _connection.CreateCommand())
+        {
+            versionCmd.CommandText = "PRAGMA user_version;";
+            var versionObj = versionCmd.ExecuteScalar();
+            userVersion = Convert.ToInt32(versionObj, CultureInfo.InvariantCulture);
+        }
+
+        bool hasPigmentorTables;
+        using (var checkCmd = _connection.CreateCommand())
+        {
+            checkCmd.CommandText = @"
+                SELECT COUNT(*) FROM sqlite_master 
+                WHERE type IN ('table', 'shadow') 
+                  AND name IN ('chunks', 'pigmentor_metadata', 'vec_chunks');";
+            var count = Convert.ToInt64(checkCmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+            hasPigmentorTables = count > 0;
+        }
+
+        if (userVersion == 0)
+        {
+            if (hasPigmentorTables)
+            {
+                throw new InvalidOperationException(
+                    "Incompatible SQLite schema: Pigmentor tables already exist but schema version is 0 (unversioned).");
+            }
+
+            CreateSchemaAndMetadata();
+        }
+        else if (userVersion == CurrentSchemaVersion)
+        {
+            ValidateExistingSchema();
+        }
+        else
+        {
+            throw new InvalidOperationException(
+                $"Unsupported Pigmentor SQLite schema version {userVersion}. Expected version {CurrentSchemaVersion}.");
+        }
+    }
+
+    private void CreateSchemaAndMetadata()
+    {
         using (var createCmd = _connection.CreateCommand())
         {
-            createCmd.CommandText = @"
-                CREATE TABLE IF NOT EXISTS pigmentor_metadata (
+            createCmd.CommandText = $@"
+                CREATE TABLE pigmentor_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS chunks (
+                CREATE TABLE chunks (
                     row_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chunk_id TEXT UNIQUE NOT NULL,
                     document_id TEXT NOT NULL,
@@ -441,75 +526,94 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                     embedding_model TEXT NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
-                CREATE INDEX IF NOT EXISTS idx_chunks_department ON chunks(department);
-                CREATE INDEX IF NOT EXISTS idx_chunks_silo ON chunks(silo);
-                CREATE INDEX IF NOT EXISTS idx_chunks_office ON chunks(office);
-                CREATE INDEX IF NOT EXISTS idx_chunks_confidentiality ON chunks(confidentiality_level);
-                CREATE INDEX IF NOT EXISTS idx_chunks_document_type ON chunks(document_type);
-                CREATE INDEX IF NOT EXISTS idx_chunks_fiscal_year ON chunks(fiscal_year);
-                CREATE INDEX IF NOT EXISTS idx_chunks_author ON chunks(author);
-                CREATE INDEX IF NOT EXISTS idx_chunks_last_modified ON chunks(last_modified);
+                CREATE INDEX idx_chunks_document_id ON chunks(document_id);
+                CREATE INDEX idx_chunks_department ON chunks(department);
+                CREATE INDEX idx_chunks_silo ON chunks(silo);
+                CREATE INDEX idx_chunks_office ON chunks(office);
+                CREATE INDEX idx_chunks_confidentiality ON chunks(confidentiality_level);
+                CREATE INDEX idx_chunks_document_type ON chunks(document_type);
+                CREATE INDEX idx_chunks_fiscal_year ON chunks(fiscal_year);
+                CREATE INDEX idx_chunks_author ON chunks(author);
+                CREATE INDEX idx_chunks_last_modified ON chunks(last_modified);
+
+                CREATE VIRTUAL TABLE vec_chunks USING vec0(
+                    embedding float[{_dimensions}] distance_metric=cosine
+                );
             ";
             createCmd.ExecuteNonQuery();
         }
 
-        // Check if dimensions are recorded in metadata
+        using (var metaCmd = _connection.CreateCommand())
+        {
+            metaCmd.CommandText = @"
+                INSERT INTO pigmentor_metadata(key, value) VALUES ('dimensions', $dimensions)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+
+                INSERT INTO pigmentor_metadata(key, value) VALUES ('embedding_model', $embedding_model)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+            ";
+            metaCmd.Parameters.AddWithValue("$dimensions", _dimensions.ToString(CultureInfo.InvariantCulture));
+            metaCmd.Parameters.AddWithValue("$embedding_model", _embeddingModel);
+            metaCmd.ExecuteNonQuery();
+        }
+
+        using (var versionCmd = _connection.CreateCommand())
+        {
+            versionCmd.CommandText = $"PRAGMA user_version = {CurrentSchemaVersion};";
+            versionCmd.ExecuteNonQuery();
+        }
+    }
+
+    private void ValidateExistingSchema()
+    {
+        // 1. Verify required tables exist
+        using (var checkCmd = _connection.CreateCommand())
+        {
+            checkCmd.CommandText = @"
+                SELECT COUNT(*) FROM sqlite_master 
+                WHERE type IN ('table', 'shadow') 
+                  AND name IN ('chunks', 'pigmentor_metadata', 'vec_chunks');";
+            var count = Convert.ToInt64(checkCmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+            if (count < 3)
+            {
+                throw new InvalidOperationException("Incompatible SQLite schema: required Pigmentor tables are missing.");
+            }
+        }
+
+        // 2. Validate dimensions
         using (var metaCmd = _connection.CreateCommand())
         {
             metaCmd.CommandText = "SELECT value FROM pigmentor_metadata WHERE key = 'dimensions';";
             var existingDimObj = metaCmd.ExecuteScalar();
-            if (existingDimObj != null && int.TryParse(existingDimObj.ToString(), out var existingDim))
+            if (existingDimObj == null || !int.TryParse(existingDimObj.ToString(), out var existingDim))
             {
-                if (_dimensions > 0 && _dimensions != existingDim)
-                {
-                    throw new InvalidOperationException(
-                        $"Database dimension mismatch: database is configured for {existingDim} dimensions, but store requested {_dimensions}.");
-                }
+                throw new InvalidOperationException("Incompatible SQLite schema: missing or invalid 'dimensions' metadata.");
+            }
 
-                _dimensions = existingDim;
-                _schemaInitialized = true;
+            if (_dimensions != existingDim)
+            {
+                throw new InvalidOperationException(
+                    $"Database dimension mismatch: database is configured for {existingDim} dimensions, but store requested {_dimensions}.");
             }
         }
 
-        if (_dimensions > 0)
+        // 3. Validate embedding model
+        using (var modelCmd = _connection.CreateCommand())
         {
-            EnsureVirtualTable(_dimensions, _options.EmbeddingModel);
-        }
-    }
-
-    private void EnsureVirtualTable(int dimensions, string? embeddingModel)
-    {
-        if (_schemaInitialized && _dimensions == dimensions)
-        {
-            return;
-        }
-
-        _dimensions = dimensions;
-
-        using (var cmd = _connection.CreateCommand())
-        {
-            cmd.CommandText = $@"
-                CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
-                    embedding float[{_dimensions}] distance_metric=cosine
-                );
-
-                INSERT INTO pigmentor_metadata(key, value) VALUES ('dimensions', '{_dimensions}')
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-            ";
-
-            if (!string.IsNullOrWhiteSpace(embeddingModel))
+            modelCmd.CommandText = "SELECT value FROM pigmentor_metadata WHERE key = 'embedding_model';";
+            var existingModelObj = modelCmd.ExecuteScalar();
+            var existingModel = existingModelObj?.ToString();
+            if (string.IsNullOrWhiteSpace(existingModel))
             {
-                cmd.CommandText += $@"
-                    INSERT INTO pigmentor_metadata(key, value) VALUES ('embedding_model', '{embeddingModel}')
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-                ";
+                throw new InvalidOperationException("Incompatible SQLite schema: missing or invalid 'embedding_model' metadata.");
             }
 
-            cmd.ExecuteNonQuery();
+            if (!string.Equals(existingModel, _embeddingModel, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Database embedding model mismatch: database is configured for model '{existingModel}', but store requested '{_embeddingModel}'.");
+            }
         }
-
-        _schemaInitialized = true;
     }
 
     private void ThrowIfDisposed()

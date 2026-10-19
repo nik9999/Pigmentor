@@ -12,7 +12,7 @@ public sealed class SqliteVecStoreOptions
 
     /// <summary>
     /// Vector dimensions (e.g. 1536 for OpenAI small, 768 for nomic-embed-text).
-    /// If 0, dimension is inferred upon first insertion or read from existing database metadata.
+    /// Required and must be greater than zero.
     /// </summary>
     public int Dimensions { get; set; }
 
@@ -29,7 +29,7 @@ public sealed class SqliteVecStoreOptions
 
     /// <summary>
     /// Name of the embedding model stored in database metadata.
+    /// Required to enforce single embedding space invariant per database.
     /// </summary>
-    public string? EmbeddingModel { get; set; }
+    public string EmbeddingModel { get; set; } = string.Empty;
 }
-

@@ -4,14 +4,64 @@ using Microsoft.Data.Sqlite;
 namespace Pigmentor.VectorStore.SqliteVec;
 
 /// <summary>
-/// Handles native loading of the sqlite-vec extension (vec0) across Windows, Linux, and macOS.
+/// Handles native loading of the sqlite-vec extension (vec0) across Windows, Linux, and macOS,
+/// as well as deterministic SQLite provider bootstrapping.
 /// </summary>
 public static class SqliteVecExtensionLoader
 {
     private static int _providerInitialized;
 
     /// <summary>
-    /// Loads the sqlite-vec extension on the provided SQLite connection.
+    /// Ensures that the SQLite native provider/runtime is initialized before any SQLite connection is opened.
+    /// Safe to call multiple times.
+    /// </summary>
+    public static void EnsureSqliteProvider()
+    {
+        if (Volatile.Read(ref _providerInitialized) != 0)
+        {
+            return;
+        }
+
+        if (IsProviderOperational())
+        {
+            Interlocked.Exchange(ref _providerInitialized, 1);
+            return;
+        }
+
+        try
+        {
+            SQLitePCL.Batteries_V2.Init();
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                "Failed to initialize SQLite native provider required by Pigmentor.VectorStore.SqliteVec.",
+                ex);
+        }
+
+        if (!IsProviderOperational())
+        {
+            throw new InvalidOperationException(
+                "Failed to initialize SQLite native provider required by Pigmentor.VectorStore.SqliteVec: provider failed validation.");
+        }
+
+        Interlocked.Exchange(ref _providerInitialized, 1);
+    }
+
+    private static bool IsProviderOperational()
+    {
+        try
+        {
+            return SQLitePCL.raw.sqlite3_libversion_number() > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Loads and verifies the sqlite-vec extension on the provided SQLite connection.
     /// </summary>
     /// <param name="connection">The open SQLite connection.</param>
     /// <param name="explicitPath">Optional explicit path to the native extension file.</param>
@@ -19,7 +69,7 @@ public static class SqliteVecExtensionLoader
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        EnsureProvider();
+        EnsureSqliteProvider();
 
         connection.EnableExtensions(true);
 
@@ -32,14 +82,36 @@ public static class SqliteVecExtensionLoader
                     explicitPath);
             }
 
-            connection.LoadExtension(explicitPath);
+            try
+            {
+                connection.LoadExtension(explicitPath);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to load sqlite-vec extension from explicit path '{explicitPath}'.",
+                    ex);
+            }
+
+            VerifyExtension(connection);
             return;
         }
 
         var resolvedPath = ResolveExtensionPath();
         if (resolvedPath != null && File.Exists(resolvedPath))
         {
-            connection.LoadExtension(resolvedPath);
+            try
+            {
+                connection.LoadExtension(resolvedPath);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to load sqlite-vec extension from resolved path '{resolvedPath}'.",
+                    ex);
+            }
+
+            VerifyExtension(connection);
             return;
         }
 
@@ -52,6 +124,32 @@ public static class SqliteVecExtensionLoader
         {
             throw new DllNotFoundException(
                 $"Could not load sqlite-vec native extension (vec0). Probed '{resolvedPath ?? "null"}' and system library path.",
+                ex);
+        }
+
+        VerifyExtension(connection);
+    }
+
+    /// <summary>
+    /// Verifies that the sqlite-vec extension functions are available and responsive.
+    /// </summary>
+    private static void VerifyExtension(SqliteConnection connection)
+    {
+        try
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT vec_version();";
+            var result = cmd.ExecuteScalar();
+            if (result == null || string.IsNullOrWhiteSpace(result.ToString()))
+            {
+                throw new InvalidOperationException(
+                    "sqlite-vec extension verification failed: vec_version() returned an empty result.");
+            }
+        }
+        catch (Exception ex) when (ex is not InvalidOperationException)
+        {
+            throw new InvalidOperationException(
+                "sqlite-vec extension is unavailable or incompatible: failed to execute vec_version().",
                 ex);
         }
     }
@@ -116,20 +214,4 @@ public static class SqliteVecExtensionLoader
 
         return null;
     }
-
-    private static void EnsureProvider()
-    {
-        if (Interlocked.Exchange(ref _providerInitialized, 1) == 0)
-        {
-            try
-            {
-                SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_dynamic_cdecl());
-            }
-            catch
-            {
-                // Ambient provider already registered or dynamic_cdecl not available
-            }
-        }
-    }
 }
-
