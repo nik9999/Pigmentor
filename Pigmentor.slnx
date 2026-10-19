@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Pigmentor.GigaChat/Pigmentor.GigaChat.csproj" />
     <Project Path="src/Pigmentor.Core/Pigmentor.Core.csproj" />
+    <Project Path="src/Pigmentor.Evaluation/Pigmentor.Evaluation.csproj" />
     <Project Path="src/Pigmentor.Generation/Pigmentor.Generation.csproj" />
     <Project Path="src/Pigmentor.Ingestion/Pigmentor.Ingestion.csproj" />
     <Project Path="src/Pigmentor.Retrieval/Pigmentor.Retrieval.csproj" />

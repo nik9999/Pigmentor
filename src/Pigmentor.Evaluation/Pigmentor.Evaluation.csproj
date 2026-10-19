@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <Description>Offline and online evaluation for the Pigmentor RAG stack: retrieval metrics, groundedness/faithfulness judges, and ground-truth scoring used to measure answer quality and guard against regressions.</Description>
+    <PackageTags>rag;evaluation;metrics;groundedness;faithfulness;ai;llm;dotnet</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.9.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Pigmentor.Core\Pigmentor.Core.csproj" />
+    <ProjectReference Include="..\Pigmentor.Generation\Pigmentor.Generation.csproj" />
+  </ItemGroup>
+
+</Project>
