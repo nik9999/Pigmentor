@@ -8,10 +8,7 @@ namespace Pigmentor.Retrieval;
 
 /// <summary>
 /// Sparse keyword retriever — in-process BM25 (Robertson / Spärck-Jones)
-/// over an indexed corpus of <see cref="DocumentChunk"/>s. Chosen over an
-/// Azure AI Search dependency for Phase 2 because it works offline; Ch 8's
-/// production guidance still recommends Azure AI Search for the
-/// production-default sparse path. The math is the standard formulation:
+/// over an indexed corpus of <see cref="DocumentChunk"/>s. The math is the standard formulation:
 ///
 /// <code>
 ///   bm25(q, d) = Σ_{t in q} idf(t) × ((k1 + 1) × tf(t,d))

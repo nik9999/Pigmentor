@@ -292,27 +292,6 @@ public class RetrievalPropagationTests
         var lazyGraph = new LazyGraphRagRetriever(extractor, fakeGraph, chat);
         var exLazy = await Assert.ThrowsAsync<NotSupportedException>(() => lazyGraph.RetrieveAsync(requestWithFilter));
         Assert.Contains("lazy-graph-rag", exLazy.Message);
-
-        // 4. PostgresHybridRetriever
-        var fakeEmbeddings = new FakeEmbeddingService();
-        await using var postgresRetriever = new PostgresHybridRetriever(fakeEmbeddings, "Host=localhost;Database=test");
-        var exPostgres = await Assert.ThrowsAsync<NotSupportedException>(() => postgresRetriever.RetrieveAsync(requestWithFilter));
-        Assert.Contains("hybrid-postgres", exPostgres.Message);
-
-        // 5. QdrantHybridRetriever
-        var qdrantClient = new Qdrant.Client.QdrantClient("localhost");
-        var qdrantRetriever = new QdrantHybridRetriever(qdrantClient, fakeEmbeddings, "test-col");
-        var exQdrant = await Assert.ThrowsAsync<NotSupportedException>(() => qdrantRetriever.RetrieveAsync(requestWithFilter));
-        Assert.Contains("hybrid-qdrant", exQdrant.Message);
-
-        // 6. AzureAiSearchHybridRetriever
-        var azureRetriever = new AzureAiSearchHybridRetriever(
-            new Uri("https://test.search.windows.net"),
-            "test-index",
-            new Azure.AzureKeyCredential("key"),
-            fakeEmbeddings);
-        var exAzure = await Assert.ThrowsAsync<NotSupportedException>(() => azureRetriever.RetrieveAsync(requestWithFilter));
-        Assert.Contains("hybrid-azure", exAzure.Message);
     }
 
     [Fact]

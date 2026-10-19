@@ -207,7 +207,6 @@ public sealed class HostingTests
         var config = new ConfigurationBuilder().Build();
         var builder = services.AddPigmentorRagPipeline(config, options =>
         {
-            options.UseQdrant("localhost:6334");
             options.EnableReranking();
         });
 

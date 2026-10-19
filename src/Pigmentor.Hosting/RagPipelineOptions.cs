@@ -7,9 +7,6 @@ namespace Pigmentor.Hosting;
 public sealed class RagPipelineOptions
 {
     [Obsolete("Use services.AddPigmentor() with retrieval provider extensions instead.")]
-    public RagPipelineOptions UseQdrant(string connectionString) => this;
-
-    [Obsolete("Use services.AddPigmentor() with retrieval provider extensions instead.")]
     public RagPipelineOptions UseNeo4j(string connectionString) => this;
 
     [Obsolete("Use services.AddPigmentor() with retrieval provider extensions instead.")]

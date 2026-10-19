@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.0" />
+    <PackageReference Include="sqlite-vec" Version="0.1.7-alpha.2.1" />
     <PackageReference Include="SQLitePCLRaw.provider.dynamic_cdecl" Version="2.1.11" />
   </ItemGroup>
 

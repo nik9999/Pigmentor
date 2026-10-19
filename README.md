@@ -11,13 +11,11 @@ with a project-specific `Pigmentor.*` namespace.
 - `Pigmentor.Generation` contains the retrieve-augment-generate pipeline.
 - `Pigmentor.GigaChat` contains the Sber GigaChat REST adapter and Microsoft.Extensions.AI implementations.
 - `Pigmentor.Hosting` contains the composition root, `PigmentorBuilder`, and top-level DI registrations (`UseOllama`, `UseGigaChat`, `UseConfiguredProviders`).
-- `Pigmentor.VectorStore.SqliteVec` persists chunks and embeddings in SQLite and exposes an explicit sqlite-vec loading seam.
+- `Pigmentor.VectorStore.SqliteVec` provides embedded, portable vector storage powered by SQLite and native sqlite-vec (`vec0`), supporting transactional relational chunk storage and storage-side metadata pre-filtering.
 - `Pigmentor.Tests` contains unit and integration tests.
 
 The default provider is local Ollama (`nomic-embed-text` and `llama3.2`).
-The sqlite-vec native extension is intentionally loaded by the host through
-`SqliteVecStore.LoadVectorExtension`; deployment packaging will be added after
-the target native binaries are selected for Windows/Linux.
+The sqlite-vec native extension (`vec0`) is automatically resolved and loaded across platforms (Windows, Linux, macOS) by `SqliteVecExtensionLoader`, with support for an explicit path override if needed.
 
 Chat and embeddings are configured independently:
 

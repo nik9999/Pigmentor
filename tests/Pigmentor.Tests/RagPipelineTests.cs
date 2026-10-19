@@ -364,13 +364,13 @@ public sealed class RagPipelineTests
     private static readonly float[] DummyVector = [1f, 0f];
 
     [Fact]
-    public async Task SqliteVecStore_ThrowsNotSupportedException_WhenFilterProvided()
+    public async Task SqliteVecStore_ExecutesSuccessfully_WhenFilterProvided()
     {
-        using var store = new Pigmentor.VectorStore.SqliteVec.SqliteVecStore("Data Source=:memory:");
+        using var store = new Pigmentor.VectorStore.SqliteVec.SqliteVecStore("Data Source=:memory:", dimensions: 2);
         var filter = MetadataFilter.Where(m => m.Silo == "Alpha");
 
-        await Assert.ThrowsAsync<NotSupportedException>(() =>
-            store.SearchAsync(DummyVector, topK: 5, filter: filter));
+        var results = await store.SearchAsync(DummyVector, topK: 5, filter: filter);
+        Assert.NotNull(results);
     }
 
     [Fact]

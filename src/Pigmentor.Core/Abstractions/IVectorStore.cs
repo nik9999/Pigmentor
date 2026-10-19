@@ -9,7 +9,7 @@ namespace Pigmentor.Core.Abstractions;
 /// class adapters target) by intent: this interface is shaped around
 /// Pigmentor domain types (<see cref="EmbeddedChunk"/>, <see cref="RetrievalResult"/>)
 /// and exposes only the operations the book actually uses.
-/// Chapter 6 ships the Qdrant, Azure AI Search, and in-memory adapters.
+/// The primary persistent implementation is SqliteVecStore (Pigmentor.VectorStore.SqliteVec).
 /// </summary>
 public interface IVectorStore
 {
