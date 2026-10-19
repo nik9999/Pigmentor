@@ -49,11 +49,25 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         var contentHash = IngestionFingerprint.ComputeContentHash(document.Content);
         var metadataHash = IngestionFingerprint.ComputeMetadataHash(document.Metadata);
 
+        // Enforce global DocumentId uniqueness per database across synchronization scopes (§21, §26)
+        var existingSourceId = await _stateStore.GetSourceIdAsync(docId, cancellationToken).ConfigureAwait(false);
+        if (existingSourceId != null && !string.Equals(existingSourceId, sourceId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Document '{docId}' is already registered in synchronization scope '{existingSourceId}', cannot ingest under scope '{sourceId}'. DocumentId must be globally unique per database.");
+        }
+
         var existingState = await _stateStore.GetAsync(docId, sourceId, cancellationToken).ConfigureAwait(false);
         var changeKind = DocumentChangeClassifier.Classify(existingState, contentHash, metadataHash);
 
         if (changeKind == DocumentChangeKind.Unchanged && existingState is not null)
         {
+            if (explicitVersion.HasValue && explicitVersion.Value < existingState.Version)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot ingest document '{docId}' with explicit version {explicitVersion.Value} because stored version is {existingState.Version}. Downgrading version is rejected.");
+            }
+
             if (_logger != null)
             {
                 Log.DocumentUnchanged(_logger, docId, sourceId);
@@ -69,20 +83,76 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         }
 
         long targetVersion;
+        long expectedVersion;
+        IngestionStatus? expectedStatus;
+
         if (explicitVersion.HasValue)
         {
-            targetVersion = explicitVersion.Value;
-        }
-        else if (existingState is null)
-        {
-            targetVersion = 1;
+            var ev = explicitVersion.Value;
+            if (ev <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(explicitVersion), "Explicit version must be positive.");
+            }
+
+            if (existingState is not null)
+            {
+                if (ev < existingState.Version)
+                {
+                    throw new InvalidOperationException(
+                        $"Cannot ingest document '{docId}' with explicit version {ev} because stored version is {existingState.Version}. Downgrading version is rejected.");
+                }
+
+                if (ev == existingState.Version)
+                {
+                    if (existingState.Status == IngestionStatus.Succeeded)
+                    {
+                        throw new InvalidOperationException(
+                            $"Cannot ingest changed document '{docId}' with duplicate explicit version {ev} which is already in Succeeded status.");
+                    }
+
+                    // Retry of incomplete/failed attempt at explicit version
+                    targetVersion = ev;
+                    expectedVersion = existingState.Version;
+                    expectedStatus = existingState.Status;
+                }
+                else
+                {
+                    targetVersion = ev;
+                    expectedVersion = existingState.Version;
+                    expectedStatus = existingState.Status;
+                }
+            }
+            else
+            {
+                targetVersion = ev;
+                expectedVersion = 0;
+                expectedStatus = null;
+            }
         }
         else
         {
-            targetVersion = existingState.Version + 1;
+            if (existingState is null)
+            {
+                targetVersion = 1;
+                expectedVersion = 0;
+                expectedStatus = null;
+            }
+            else if (existingState.Status != IngestionStatus.Succeeded)
+            {
+                // Deterministic retry semantics: retry the same version without artificially inflating version numbers (§34)
+                targetVersion = existingState.Version;
+                expectedVersion = existingState.Version;
+                expectedStatus = existingState.Status;
+            }
+            else
+            {
+                targetVersion = existingState.Version + 1;
+                expectedVersion = existingState.Version;
+                expectedStatus = IngestionStatus.Succeeded;
+            }
         }
 
-        // Record Processing status before starting mutations (recoverable boundary)
+        // Atomic CAS claim: write Processing status before mutating vector store (recoverable boundary)
         var processingState = new IngestionDocumentState(
             SourceId: sourceId,
             DocumentId: docId,
@@ -93,7 +163,11 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
             LastSuccessfulIngestion: existingState?.LastSuccessfulIngestion,
             ChunkIds: existingState?.ChunkIds ?? []);
 
-        await _stateStore.SaveAsync(processingState, cancellationToken: cancellationToken).ConfigureAwait(false);
+        await _stateStore.SaveAsync(
+            processingState,
+            expectedVersion: expectedVersion,
+            expectedStatus: expectedStatus,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -125,7 +199,7 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
                 await _vectorStore.UpsertAsync(embeddedChunks, cancellationToken).ConfigureAwait(false);
             }
 
-            // 5. Commit Succeeded state
+            // 5. Guarded commit: Transition Processing -> Succeeded only if this attempt is still current
             var newChunkIds = chunks.Select(c => c.ChunkId).ToList();
             var succeededState = new IngestionDocumentState(
                 SourceId: sourceId,
@@ -137,7 +211,11 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
                 LastSuccessfulIngestion: DateTimeOffset.UtcNow,
                 ChunkIds: newChunkIds);
 
-            await _stateStore.SaveAsync(succeededState, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await _stateStore.SaveAsync(
+                succeededState,
+                expectedVersion: targetVersion,
+                expectedStatus: IngestionStatus.Processing,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (_logger != null)
             {
@@ -153,7 +231,16 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
                 ChunksDeleted: deletedCount,
                 Skipped: false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            // Controlled cancellation: leave Processing state behind for restart/retry recovery (§8)
+            if (_logger != null)
+            {
+                Log.IngestionCanceled(_logger, docId, targetVersion);
+            }
+            throw;
+        }
+        catch (Exception ex)
         {
             if (_logger != null)
             {
@@ -161,12 +248,20 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
             }
             try
             {
+                // Conditional failure transition: only mark Failed if still in Processing at targetVersion (§7)
                 var failedState = processingState with { Status = IngestionStatus.Failed };
-                await _stateStore.SaveAsync(failedState, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                await _stateStore.SaveAsync(
+                    failedState,
+                    expectedVersion: targetVersion,
+                    expectedStatus: IngestionStatus.Processing,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
             }
-            catch
+            catch (Exception saveEx)
             {
-                // Suppress secondary error when recording failure state
+                if (_logger != null)
+                {
+                    Log.RecordFailedStatusFailed(_logger, docId, targetVersion, saveEx);
+                }
             }
             throw;
         }
@@ -288,5 +383,13 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         [LoggerMessage(EventId = 3, Level = LogLevel.Error,
             Message = "Failed to ingest document {DocumentId} (v{Version}).")]
         public static partial void IngestFailed(ILogger logger, string documentId, long version, Exception exception);
+
+        [LoggerMessage(EventId = 4, Level = LogLevel.Information,
+            Message = "Ingestion for document {DocumentId} (v{Version}) was canceled; leaving Processing state for restart recovery.")]
+        public static partial void IngestionCanceled(ILogger logger, string documentId, long version);
+
+        [LoggerMessage(EventId = 5, Level = LogLevel.Warning,
+            Message = "Failed to record Failed status for document {DocumentId} (v{Version}). Primary exception will be rethrown.")]
+        public static partial void RecordFailedStatusFailed(ILogger logger, string documentId, long version, Exception exception);
     }
 }

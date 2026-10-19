@@ -1,10 +1,10 @@
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using Polly;
-using Polly.Retry;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Polly;
+using Polly.Retry;
 
 namespace Pigmentor.Ingestion.Embeddings;
 

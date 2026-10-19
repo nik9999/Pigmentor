@@ -54,8 +54,8 @@ public sealed partial class IngestEventConsumer : BackgroundService
     /// </param>
     /// <param name="logger">Diagnostics logger.</param>
     /// <param name="tenantId">
-    /// When set, only events for this tenant are handled (tenant-scoped subscription).
-    /// <see langword="null"/> processes every tenant's events.
+    /// When set, filters events matching this identifier and maps to the ingestion synchronization scope (<c>source_id</c>).
+    /// Does not provide database-level tenant or security isolation. <see langword="null"/> processes events regardless of scope.
     /// </param>
     public IngestEventConsumer(
         IChangeFeed feed,

@@ -28,39 +28,39 @@ internal static class FilterExpressionParser
         switch (expression.NodeType)
         {
             case ExpressionType.AndAlso:
-            {
-                var bin = (BinaryExpression)expression;
-                return new LogicalFilterNode(
-                    LogicalOperator.And,
-                    ParseNode(bin.Left, parameter),
-                    ParseNode(bin.Right, parameter));
-            }
-
-            case ExpressionType.OrElse:
-            {
-                var bin = (BinaryExpression)expression;
-                return new LogicalFilterNode(
-                    LogicalOperator.Or,
-                    ParseNode(bin.Left, parameter),
-                    ParseNode(bin.Right, parameter));
-            }
-
-            case ExpressionType.Not:
-            {
-                var unary = (UnaryExpression)expression;
-                return new LogicalFilterNode(LogicalOperator.Not, ParseNode(unary.Operand, parameter));
-            }
-
-            case ExpressionType.Constant:
-            {
-                var constant = (ConstantExpression)expression;
-                if (constant.Value is bool b)
                 {
-                    return new ConstantFilterNode(b);
+                    var bin = (BinaryExpression)expression;
+                    return new LogicalFilterNode(
+                        LogicalOperator.And,
+                        ParseNode(bin.Left, parameter),
+                        ParseNode(bin.Right, parameter));
                 }
 
-                throw new NotSupportedException($"Unexpected constant filter expression of type '{constant.Type.Name}'.");
-            }
+            case ExpressionType.OrElse:
+                {
+                    var bin = (BinaryExpression)expression;
+                    return new LogicalFilterNode(
+                        LogicalOperator.Or,
+                        ParseNode(bin.Left, parameter),
+                        ParseNode(bin.Right, parameter));
+                }
+
+            case ExpressionType.Not:
+                {
+                    var unary = (UnaryExpression)expression;
+                    return new LogicalFilterNode(LogicalOperator.Not, ParseNode(unary.Operand, parameter));
+                }
+
+            case ExpressionType.Constant:
+                {
+                    var constant = (ConstantExpression)expression;
+                    if (constant.Value is bool b)
+                    {
+                        return new ConstantFilterNode(b);
+                    }
+
+                    throw new NotSupportedException($"Unexpected constant filter expression of type '{constant.Type.Name}'.");
+                }
 
             case ExpressionType.Equal:
             case ExpressionType.NotEqual:
@@ -68,10 +68,10 @@ internal static class FilterExpressionParser
             case ExpressionType.GreaterThanOrEqual:
             case ExpressionType.LessThan:
             case ExpressionType.LessThanOrEqual:
-            {
-                var bin = (BinaryExpression)expression;
-                return ParseComparison(bin, parameter);
-            }
+                {
+                    var bin = (BinaryExpression)expression;
+                    return ParseComparison(bin, parameter);
+                }
 
             default:
                 throw new NotSupportedException($"Filter expression '{expression}' of node type '{expression.NodeType}' is not supported.");

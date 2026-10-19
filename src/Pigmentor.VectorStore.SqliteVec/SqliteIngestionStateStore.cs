@@ -26,45 +26,12 @@ public sealed class SqliteIngestionStateStore : IIngestionStateStore, IDisposabl
         _connection = new SqliteConnection(_connectionString);
         _connection.Open();
 
-        InitializeTables();
+        PigmentorSqliteSchema.EnsureInitializedForStateStore(_connection);
     }
 
     public SqliteIngestionStateStore(SqliteVecStoreOptions options)
         : this((options ?? throw new ArgumentNullException(nameof(options))).ConnectionString)
     {
-    }
-
-    private void InitializeTables()
-    {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = @"
-            PRAGMA foreign_keys = ON;
-
-            CREATE TABLE IF NOT EXISTS ingestion_documents (
-                source_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                metadata_hash TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                last_successful_ingestion TEXT NULL,
-                PRIMARY KEY (source_id, document_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS ingestion_document_chunks (
-                source_id TEXT NOT NULL,
-                document_id TEXT NOT NULL,
-                chunk_id TEXT NOT NULL,
-                PRIMARY KEY (source_id, document_id, chunk_id),
-                FOREIGN KEY (source_id, document_id)
-                    REFERENCES ingestion_documents(source_id, document_id)
-                    ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_ingestion_docs_status
-                ON ingestion_documents(status);
-        ";
-        cmd.ExecuteNonQuery();
     }
 
     public async Task<IngestionDocumentState?> GetAsync(
@@ -257,9 +224,38 @@ public sealed class SqliteIngestionStateStore : IIngestionStateStore, IDisposabl
         }
     }
 
+    public async Task<string?> GetSourceIdAsync(
+        string documentId,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentException.ThrowIfNullOrWhiteSpace(documentId);
+
+        await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                SELECT source_id
+                FROM ingestion_documents
+                WHERE document_id = $document_id
+                LIMIT 1;
+            ";
+            cmd.Parameters.AddWithValue("$document_id", documentId);
+
+            var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return result is null or DBNull ? null : result.ToString();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task SaveAsync(
         IngestionDocumentState state,
         long? expectedVersion = null,
+        IngestionStatus? expectedStatus = null,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -272,49 +268,92 @@ public sealed class SqliteIngestionStateStore : IIngestionStateStore, IDisposabl
         {
             using var transaction = _connection.BeginTransaction();
 
-            // Optimistic concurrency check if expectedVersion is specified
-            if (expectedVersion.HasValue)
+            if (expectedVersion.HasValue && expectedVersion.Value == 0)
             {
-                using var checkCmd = _connection.CreateCommand();
-                checkCmd.Transaction = transaction;
-                checkCmd.CommandText = @"
-                    SELECT version FROM ingestion_documents
-                    WHERE source_id = $source_id AND document_id = $document_id;
-                ";
-                checkCmd.Parameters.AddWithValue("$source_id", state.SourceId);
-                checkCmd.Parameters.AddWithValue("$document_id", state.DocumentId);
-
-                var existingVerObj = await checkCmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-
-                if (expectedVersion.Value == 0)
+                // Optimistic creation of a new document: INSERT without ON CONFLICT.
+                // If a record with (source_id, document_id) already exists, Primary Key constraint violation occurs.
+                try
                 {
-                    // Expecting document to not exist yet
-                    if (existingVerObj != null && existingVerObj != DBNull.Value)
-                    {
-                        throw new InvalidOperationException(
-                            $"Optimistic concurrency violation: document '{state.DocumentId}' in source '{state.SourceId}' already exists (version {existingVerObj}), expected new document.");
-                    }
+                    using var insertCmd = _connection.CreateCommand();
+                    insertCmd.Transaction = transaction;
+                    insertCmd.CommandText = @"
+                        INSERT INTO ingestion_documents (
+                            source_id, document_id, content_hash, metadata_hash, version, status, last_successful_ingestion
+                        ) VALUES (
+                            $source_id, $document_id, $content_hash, $metadata_hash, $version, $status, $last_successful_ingestion
+                        );
+                    ";
+                    insertCmd.Parameters.AddWithValue("$source_id", state.SourceId);
+                    insertCmd.Parameters.AddWithValue("$document_id", state.DocumentId);
+                    insertCmd.Parameters.AddWithValue("$content_hash", state.ContentHash);
+                    insertCmd.Parameters.AddWithValue("$metadata_hash", state.MetadataHash);
+                    insertCmd.Parameters.AddWithValue("$version", state.Version);
+                    insertCmd.Parameters.AddWithValue("$status", state.Status.ToString());
+                    insertCmd.Parameters.AddWithValue(
+                        "$last_successful_ingestion",
+                        state.LastSuccessfulIngestion.HasValue
+                            ? state.LastSuccessfulIngestion.Value.ToString("O", CultureInfo.InvariantCulture)
+                            : (object)DBNull.Value);
+
+                    await insertCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
-                else
+                catch (SqliteException ex) when (ex.SqliteErrorCode == 19) // SQLITE_CONSTRAINT
                 {
-                    if (existingVerObj == null || existingVerObj == DBNull.Value)
-                    {
-                        throw new InvalidOperationException(
-                            $"Optimistic concurrency violation: document '{state.DocumentId}' in source '{state.SourceId}' does not exist, expected version {expectedVersion.Value}.");
-                    }
-
-                    var actualVersion = Convert.ToInt64(existingVerObj, CultureInfo.InvariantCulture);
-                    if (actualVersion != expectedVersion.Value)
-                    {
-                        throw new InvalidOperationException(
-                            $"Optimistic concurrency violation: document '{state.DocumentId}' in source '{state.SourceId}' has version {actualVersion}, expected version {expectedVersion.Value}.");
-                    }
+                    throw new IngestionConcurrencyException(
+                        $"Optimistic concurrency violation: document '{state.DocumentId}' in scope '{state.SourceId}' already exists.",
+                        ex);
                 }
             }
-
-            // Upsert document record
-            using (var docCmd = _connection.CreateCommand())
+            else if (expectedVersion.HasValue)
             {
+                // Atomic CAS update of an existing document
+                using var updateCmd = _connection.CreateCommand();
+                updateCmd.Transaction = transaction;
+
+                var sql = @"
+                    UPDATE ingestion_documents
+                    SET content_hash = $content_hash,
+                        metadata_hash = $metadata_hash,
+                        version = $version,
+                        status = $status,
+                        last_successful_ingestion = $last_successful_ingestion
+                    WHERE source_id = $source_id
+                      AND document_id = $document_id
+                      AND version = $expected_version";
+
+                if (expectedStatus.HasValue)
+                {
+                    sql += " AND status = $expected_status";
+                    updateCmd.Parameters.AddWithValue("$expected_status", expectedStatus.Value.ToString());
+                }
+
+                sql += ";";
+
+                updateCmd.CommandText = sql;
+                updateCmd.Parameters.AddWithValue("$source_id", state.SourceId);
+                updateCmd.Parameters.AddWithValue("$document_id", state.DocumentId);
+                updateCmd.Parameters.AddWithValue("$content_hash", state.ContentHash);
+                updateCmd.Parameters.AddWithValue("$metadata_hash", state.MetadataHash);
+                updateCmd.Parameters.AddWithValue("$version", state.Version);
+                updateCmd.Parameters.AddWithValue("$status", state.Status.ToString());
+                updateCmd.Parameters.AddWithValue(
+                    "$last_successful_ingestion",
+                    state.LastSuccessfulIngestion.HasValue
+                        ? state.LastSuccessfulIngestion.Value.ToString("O", CultureInfo.InvariantCulture)
+                        : (object)DBNull.Value);
+                updateCmd.Parameters.AddWithValue("$expected_version", expectedVersion.Value);
+
+                var rows = await updateCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                if (rows == 0)
+                {
+                    throw new IngestionConcurrencyException(
+                        $"Optimistic concurrency violation: document '{state.DocumentId}' in scope '{state.SourceId}' was modified or claimed concurrently (expected version {expectedVersion.Value}, status {expectedStatus?.ToString() ?? "any"}).");
+                }
+            }
+            else
+            {
+                // Unconditional upsert (when expectedVersion is null)
+                using var docCmd = _connection.CreateCommand();
                 docCmd.Transaction = transaction;
                 docCmd.CommandText = @"
                     INSERT INTO ingestion_documents (

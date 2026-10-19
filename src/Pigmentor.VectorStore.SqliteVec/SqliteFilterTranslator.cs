@@ -99,27 +99,27 @@ public static class SqliteFilterTranslator
         switch (node.Operator)
         {
             case LogicalOperator.And:
-            {
-                var parts = node.Children.Select(c => TranslateNode(c, parameters));
-                return $"({string.Join(" AND ", parts)})";
-            }
-
-            case LogicalOperator.Or:
-            {
-                var parts = node.Children.Select(c => TranslateNode(c, parameters));
-                return $"({string.Join(" OR ", parts)})";
-            }
-
-            case LogicalOperator.Not:
-            {
-                if (node.Children.Count != 1)
                 {
-                    throw new InvalidOperationException("LogicalOperator.Not must have exactly one child node.");
+                    var parts = node.Children.Select(c => TranslateNode(c, parameters));
+                    return $"({string.Join(" AND ", parts)})";
                 }
 
-                var childSql = TranslateNode(node.Children[0], parameters);
-                return $"(NOT {childSql})";
-            }
+            case LogicalOperator.Or:
+                {
+                    var parts = node.Children.Select(c => TranslateNode(c, parameters));
+                    return $"({string.Join(" OR ", parts)})";
+                }
+
+            case LogicalOperator.Not:
+                {
+                    if (node.Children.Count != 1)
+                    {
+                        throw new InvalidOperationException("LogicalOperator.Not must have exactly one child node.");
+                    }
+
+                    var childSql = TranslateNode(node.Children[0], parameters);
+                    return $"(NOT {childSql})";
+                }
 
             default:
                 throw new NotSupportedException($"Logical operator '{node.Operator}' is not supported.");

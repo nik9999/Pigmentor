@@ -201,10 +201,10 @@ public sealed class IngestionStateTests : IDisposable
         await store.SaveAsync(state1, expectedVersion: 0);
 
         // expectedVersion = 0 when already exists -> throws
-        await Assert.ThrowsAsync<InvalidOperationException>(() => store.SaveAsync(state1, expectedVersion: 0));
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() => store.SaveAsync(state1, expectedVersion: 0));
 
         // expectedVersion = 99 (mismatch) -> throws
-        await Assert.ThrowsAsync<InvalidOperationException>(() => store.SaveAsync(state1 with { Version = 2 }, expectedVersion: 99));
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() => store.SaveAsync(state1 with { Version = 2 }, expectedVersion: 99));
 
         // expectedVersion = 1 (matching) -> succeeds
         await store.SaveAsync(state1 with { Version = 2 }, expectedVersion: 1);
@@ -675,6 +675,964 @@ public sealed class IngestionStateTests : IDisposable
         Assert.NotNull(provider.GetService<IDocumentIngestionService>());
     }
 
+    // --- 8. Concurrency & CAS Integrity Tests ---
+
+    [Fact]
+    public async Task ConcurrentUpdate_OnlyOneWriterClaimsNextVersion()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        // Pre-populate document at Version 1, Succeeded
+        var initial = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-race-update",
+            ContentHash: "h1",
+            MetadataHash: "m1",
+            Version: 1,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c1"]);
+        await store.SaveAsync(initial);
+
+        // Worker A and Worker B both read Version 1 and attempt CAS claim to v2 Processing
+        var claimA = initial with { Version = 2, Status = IngestionStatus.Processing, ContentHash = "h2" };
+        var claimB = initial with { Version = 2, Status = IngestionStatus.Processing, ContentHash = "h3" };
+
+        // Worker A claims v2
+        await store.SaveAsync(claimA, expectedVersion: 1, expectedStatus: IngestionStatus.Succeeded);
+
+        // Worker B tries to claim v2 based on v1 Succeeded -> fails with IngestionConcurrencyException
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() =>
+            store.SaveAsync(claimB, expectedVersion: 1, expectedStatus: IngestionStatus.Succeeded));
+
+        var current = await store.GetAsync("doc-race-update");
+        Assert.NotNull(current);
+        Assert.Equal(2, current.Version);
+        Assert.Equal(IngestionStatus.Processing, current.Status);
+        Assert.Equal("h2", current.ContentHash);
+    }
+
+    [Fact]
+    public async Task ConcurrentNewDocument_OnlyOneWriterClaimsVersionOne()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        var docStateA = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-race-new",
+            ContentHash: "h1",
+            MetadataHash: "m1",
+            Version: 1,
+            Status: IngestionStatus.Processing,
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+
+        var docStateB = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-race-new",
+            ContentHash: "h2",
+            MetadataHash: "m2",
+            Version: 1,
+            Status: IngestionStatus.Processing,
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+
+        // Worker A claims new doc
+        await store.SaveAsync(docStateA, expectedVersion: 0);
+
+        // Worker B tries to claim new doc with same PK -> throws IngestionConcurrencyException
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() =>
+            store.SaveAsync(docStateB, expectedVersion: 0));
+
+        var current = await store.GetAsync("doc-race-new");
+        Assert.NotNull(current);
+        Assert.Equal(1, current.Version);
+        Assert.Equal("h1", current.ContentHash);
+    }
+
+    [Fact]
+    public async Task StaleWriter_CannotMarkSucceeded()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        // Worker A claims v2 Processing
+        var stateV2Processing = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-stale-success",
+            ContentHash: "h2",
+            MetadataHash: "m2",
+            Version: 2,
+            Status: IngestionStatus.Processing,
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+        await store.SaveAsync(stateV2Processing, expectedVersion: 0);
+
+        // Worker B concurrently advances document to v3 Succeeded
+        var stateV3Succeeded = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-stale-success",
+            ContentHash: "h3",
+            MetadataHash: "m3",
+            Version: 3,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c3"]);
+        await store.SaveAsync(stateV3Succeeded);
+
+        // Stale Worker A finishes and tries to mark v2 as Succeeded
+        var stateV2Succeeded = stateV2Processing with { Status = IngestionStatus.Succeeded };
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() =>
+            store.SaveAsync(stateV2Succeeded, expectedVersion: 2, expectedStatus: IngestionStatus.Processing));
+
+        // State remains v3 Succeeded
+        var final = await store.GetAsync("doc-stale-success");
+        Assert.NotNull(final);
+        Assert.Equal(3, final.Version);
+        Assert.Equal(IngestionStatus.Succeeded, final.Status);
+    }
+
+    [Fact]
+    public async Task StaleWriter_CannotMarkFailed()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        // Worker A claims v2 Processing
+        var stateV2Processing = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-stale-fail",
+            ContentHash: "h2",
+            MetadataHash: "m2",
+            Version: 2,
+            Status: IngestionStatus.Processing,
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+        await store.SaveAsync(stateV2Processing, expectedVersion: 0);
+
+        // Newer run succeeds at v3
+        var stateV3Succeeded = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-stale-fail",
+            ContentHash: "h3",
+            MetadataHash: "m3",
+            Version: 3,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c3"]);
+        await store.SaveAsync(stateV3Succeeded);
+
+        // Stale Worker A tries to record Failure for v2
+        var stateV2Failed = stateV2Processing with { Status = IngestionStatus.Failed };
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() =>
+            store.SaveAsync(stateV2Failed, expectedVersion: 2, expectedStatus: IngestionStatus.Processing));
+
+        // State remains v3 Succeeded (not corrupted by stale failure)
+        var final = await store.GetAsync("doc-stale-fail");
+        Assert.NotNull(final);
+        Assert.Equal(3, final.Version);
+        Assert.Equal(IngestionStatus.Succeeded, final.Status);
+    }
+
+    // --- 9. Schema Authority Tests ---
+
+    [Fact]
+    public async Task StateStoreFirst_InitializesValidV2Schema()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_statestore_first_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            // 1. Open State Store first on fresh DB
+            using (var stateStore = new SqliteIngestionStateStore(connStr))
+            {
+                var doc = new IngestionDocumentState("default", "d1", "h1", "m1", 1, IngestionStatus.Succeeded, DateTimeOffset.UtcNow, ["c1"]);
+                await stateStore.SaveAsync(doc);
+            }
+
+            // Verify user_version is 2
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version;";
+                Assert.Equal(2, Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            // 2. Open Vector Store subsequently on the same DB
+            using (var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = connStr,
+                Dimensions = 2,
+                EmbeddingModel = "test-model"
+            }))
+            {
+                var meta = new DocumentMetadata("d1", "silo", "dept", "off", "conf", "type", 2024, "auth", new DateOnly(2024, 1, 1), "title");
+                var chunk = new EmbeddedChunk(new DocumentChunk("c1", "d1", 0, "text", 0, 4, meta), new float[] { 1f, 0f }, "test-model");
+                await vectorStore.UpsertAsync([chunk]);
+
+                var res = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 1);
+                Assert.Single(res);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) { File.Delete(tempDb); } } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task VectorStoreFirst_StateStoreUsesSameSchema()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_vectorstore_first_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            // 1. Open Vector Store first on fresh DB
+            using (var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = connStr,
+                Dimensions = 2,
+                EmbeddingModel = "test-model"
+            }))
+            {
+                var meta = new DocumentMetadata("d1", "silo", "dept", "off", "conf", "type", 2024, "auth", new DateOnly(2024, 1, 1), "title");
+                var chunk = new EmbeddedChunk(new DocumentChunk("c1", "d1", 0, "text", 0, 4, meta), new float[] { 1f, 0f }, "test-model");
+                await vectorStore.UpsertAsync([chunk]);
+            }
+
+            // Verify user_version is 2
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version;";
+                Assert.Equal(2, Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            // 2. Open State Store subsequently on the same DB
+            using (var stateStore = new SqliteIngestionStateStore(connStr))
+            {
+                var doc = new IngestionDocumentState("default", "d1", "h1", "m1", 1, IngestionStatus.Succeeded, DateTimeOffset.UtcNow, ["c1"]);
+                await stateStore.SaveAsync(doc);
+
+                var retrieved = await stateStore.GetAsync("d1");
+                Assert.NotNull(retrieved);
+                Assert.Equal(1, retrieved.Version);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) { File.Delete(tempDb); } } catch { }
+        }
+    }
+
+    [Fact]
+    public void UnsupportedSchemaVersion_FailsFromStateStore()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_unsupported_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version = 99;";
+                cmd.ExecuteNonQuery();
+            }
+
+            var ex = Assert.Throws<InvalidOperationException>(() => new SqliteIngestionStateStore(connStr));
+            Assert.Contains("Unsupported Pigmentor SQLite schema version 99", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) { File.Delete(tempDb); } } catch { }
+        }
+    }
+
+    [Fact]
+    public void UnsupportedSchemaVersion_FailsFromVectorStore()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_unsupported_vec_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version = 99;";
+                cmd.ExecuteNonQuery();
+            }
+
+            var ex = Assert.Throws<InvalidOperationException>(() => new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = connStr,
+                Dimensions = 2,
+                EmbeddingModel = "test-model"
+            }));
+            Assert.Contains("Unsupported Pigmentor SQLite schema version 99", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) { File.Delete(tempDb); } } catch { }
+        }
+    }
+
+    [Fact]
+    public void UnversionedDatabaseWithTables_FailsFromStateStore()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_unversioned_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "CREATE TABLE foreign_table (id INTEGER PRIMARY KEY, data TEXT);";
+                cmd.ExecuteNonQuery();
+            }
+
+            var ex = Assert.Throws<InvalidOperationException>(() => new SqliteIngestionStateStore(connStr));
+            Assert.Contains("Cannot open unversioned SQLite database with existing tables", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) { File.Delete(tempDb); } } catch { }
+        }
+    }
+
+    // --- 10. Retry, Version Guarding & Scope Collision Tests ---
+
+    [Fact]
+    public async Task FailedAttempt_RetriesSameVersion_SuccessfullyCompletes()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        var flakyEmbedder = new FlakyEmbeddingService { ShouldFail = true };
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), flakyEmbedder);
+
+        var doc = CreateDocument("doc-retry", "Content to be ingested.");
+
+        // First attempt fails during embedding
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.IngestAsync(doc));
+        Assert.Equal("Simulated embedding transient failure.", ex.Message);
+
+        // State in DB is Failed, Version 1
+        var failedState = await stateStore.GetAsync("doc-retry");
+        Assert.NotNull(failedState);
+        Assert.Equal(1, failedState.Version);
+        Assert.Equal(IngestionStatus.Failed, failedState.Status);
+
+        // Second attempt retries: embedder succeeds
+        flakyEmbedder.ShouldFail = false;
+        var result = await service.IngestAsync(doc);
+
+        // Result has Version 1 (version was NOT inflated to 2 on retry)
+        Assert.Equal(1, result.Version);
+        Assert.Equal(IngestionStatus.Succeeded, result.Status);
+        Assert.False(result.Skipped);
+
+        // State in DB is now Succeeded at Version 1
+        var succeededState = await stateStore.GetAsync("doc-retry");
+        Assert.NotNull(succeededState);
+        Assert.Equal(1, succeededState.Version);
+        Assert.Equal(IngestionStatus.Succeeded, succeededState.Status);
+        Assert.NotNull(succeededState.LastSuccessfulIngestion);
+    }
+
+    [Fact]
+    public async Task StaleExplicitVersion_Throws()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        // Document at version 5
+        await stateStore.SaveAsync(new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-explicit-stale",
+            ContentHash: "h5",
+            MetadataHash: "m5",
+            Version: 5,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c5"]));
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+        var doc = CreateDocument("doc-explicit-stale", "Content v3");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.IngestAsync(doc, explicitVersion: 3));
+        Assert.Contains("Downgrading version is rejected", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DuplicateExplicitVersion_SucceededSkips_ChangedThrows()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        var doc = CreateDocument("doc-explicit-dup", "Content v5");
+        var cHash = IngestionFingerprint.ComputeContentHash(doc.Content);
+        var mHash = IngestionFingerprint.ComputeMetadataHash(doc.Metadata);
+
+        // Document at version 5 Succeeded
+        await stateStore.SaveAsync(new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-explicit-dup",
+            ContentHash: cHash,
+            MetadataHash: mHash,
+            Version: 5,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c5"]));
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+
+        // Same content with same explicitVersion = 5 -> skips cleanly
+        var skipRes = await service.IngestAsync(doc, explicitVersion: 5);
+        Assert.True(skipRes.Skipped);
+        Assert.Equal(5, skipRes.Version);
+
+        // Modified content with duplicate explicitVersion = 5 -> throws
+        var changedDoc = CreateDocument("doc-explicit-dup", "Changed content v5");
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.IngestAsync(changedDoc, explicitVersion: 5));
+        Assert.Contains("duplicate explicit version 5", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NewerExplicitVersion_Accepted()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        // Document at version 2
+        await stateStore.SaveAsync(new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-explicit-newer",
+            ContentHash: "h2",
+            MetadataHash: "m2",
+            Version: 2,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c2"]));
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+        var doc = CreateDocument("doc-explicit-newer", "Content updated to v5");
+
+        var result = await service.IngestAsync(doc, explicitVersion: 5);
+        Assert.False(result.Skipped);
+        Assert.Equal(5, result.Version);
+        Assert.Equal(IngestionStatus.Succeeded, result.Status);
+
+        var saved = await stateStore.GetAsync("doc-explicit-newer");
+        Assert.NotNull(saved);
+        Assert.Equal(5, saved.Version);
+    }
+
+    [Fact]
+    public async Task DocumentId_CrossSourceScopeCollision_Throws()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+
+        var doc = CreateDocument("doc-scope-collision", "Content");
+
+        // Ingest under source scope 'source-A'
+        var resA = await service.IngestAsync(doc, sourceId: "source-A");
+        Assert.Equal(IngestionStatus.Succeeded, resA.Status);
+
+        // Attempting to ingest same doc under source scope 'source-B' throws collision exception
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.IngestAsync(doc, sourceId: "source-B"));
+        Assert.Contains("already registered in synchronization scope 'source-A'", ex.Message, StringComparison.Ordinal);
+    }
+
+    // --- 8. Concurrency & CAS Integrity Tests ---
+
+    [Fact]
+    public async Task ConcurrentUpdate_OnlyOneWriterClaimsNextVersion()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        // Pre-populate document at Version 1, Succeeded
+        var initial = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-race-update",
+            ContentHash: "h1",
+            MetadataHash: "m1",
+            Version: 1,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c1"]);
+        await store.SaveAsync(initial);
+
+        // Worker A and Worker B both read Version 1 and attempt CAS claim to v2 Processing
+        var claimA = initial with { Version = 2, Status = IngestionStatus.Processing, ContentHash = "h2" };
+        var claimB = initial with { Version = 2, Status = IngestionStatus.Processing, ContentHash = "h3" };
+
+        // Worker A claims v2
+        await store.SaveAsync(claimA, expectedVersion: 1, expectedStatus: IngestionStatus.Succeeded);
+
+        // Worker B tries to claim v2 based on v1 Succeeded -> fails with IngestionConcurrencyException
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() =>
+            store.SaveAsync(claimB, expectedVersion: 1, expectedStatus: IngestionStatus.Succeeded));
+
+        var current = await store.GetAsync("doc-race-update");
+        Assert.NotNull(current);
+        Assert.Equal(2, current.Version);
+        Assert.Equal(IngestionStatus.Processing, current.Status);
+        Assert.Equal("h2", current.ContentHash);
+    }
+
+    [Fact]
+    public async Task ConcurrentNewDocument_OnlyOneWriterClaimsVersionOne()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        var docStateA = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-race-new",
+            ContentHash: "h1",
+            MetadataHash: "m1",
+            Version: 1,
+            Status: IngestionStatus.Processing,
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+
+        var docStateB = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-race-new",
+            ContentHash: "h2",
+            MetadataHash: "m2",
+            Version: 1,
+            Status: IngestionStatus.Processing,
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+
+        // Worker A claims new doc
+        await store.SaveAsync(docStateA, expectedVersion: 0);
+
+        // Worker B tries to claim new doc with same PK -> throws IngestionConcurrencyException
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() =>
+            store.SaveAsync(docStateB, expectedVersion: 0));
+
+        var current = await store.GetAsync("doc-race-new");
+        Assert.NotNull(current);
+        Assert.Equal(1, current.Version);
+        Assert.Equal("h1", current.ContentHash);
+    }
+
+    [Fact]
+    public async Task StaleWriter_CannotMarkSucceeded()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        // Worker A claims v2 Processing
+        var stateV2Processing = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-stale-success",
+            ContentHash: "h2",
+            MetadataHash: "m2",
+            Version: 2,
+            Status: IngestionStatus.Processing,
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+        await store.SaveAsync(stateV2Processing, expectedVersion: 0);
+
+        // Worker B concurrently advances document to v3 Succeeded
+        var stateV3Succeeded = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-stale-success",
+            ContentHash: "h3",
+            MetadataHash: "m3",
+            Version: 3,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c3"]);
+        await store.SaveAsync(stateV3Succeeded);
+
+        // Stale Worker A finishes and tries to mark v2 as Succeeded
+        var stateV2Succeeded = stateV2Processing with { Status = IngestionStatus.Succeeded };
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() =>
+            store.SaveAsync(stateV2Succeeded, expectedVersion: 2, expectedStatus: IngestionStatus.Processing));
+
+        // State remains v3 Succeeded
+        var final = await store.GetAsync("doc-stale-success");
+        Assert.NotNull(final);
+        Assert.Equal(3, final.Version);
+        Assert.Equal(IngestionStatus.Succeeded, final.Status);
+    }
+
+    [Fact]
+    public async Task StaleWriter_CannotMarkFailed()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        // Worker A claims v2 Processing
+        var stateV2Processing = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-stale-fail",
+            ContentHash: "h2",
+            MetadataHash: "m2",
+            Version: 2,
+            Status: IngestionStatus.Processing,
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+        await store.SaveAsync(stateV2Processing, expectedVersion: 0);
+
+        // Newer run succeeds at v3
+        var stateV3Succeeded = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-stale-fail",
+            ContentHash: "h3",
+            MetadataHash: "m3",
+            Version: 3,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c3"]);
+        await store.SaveAsync(stateV3Succeeded);
+
+        // Stale Worker A tries to record Failure for v2
+        var stateV2Failed = stateV2Processing with { Status = IngestionStatus.Failed };
+        await Assert.ThrowsAsync<IngestionConcurrencyException>(() =>
+            store.SaveAsync(stateV2Failed, expectedVersion: 2, expectedStatus: IngestionStatus.Processing));
+
+        // State remains v3 Succeeded (not corrupted by stale failure)
+        var final = await store.GetAsync("doc-stale-fail");
+        Assert.NotNull(final);
+        Assert.Equal(3, final.Version);
+        Assert.Equal(IngestionStatus.Succeeded, final.Status);
+    }
+
+    // --- 9. Schema Authority Tests ---
+
+    [Fact]
+    public async Task StateStoreFirst_InitializesValidV2Schema()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_statestore_first_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            // 1. Open State Store first on fresh DB
+            using (var stateStore = new SqliteIngestionStateStore(connStr))
+            {
+                var doc = new IngestionDocumentState("default", "d1", "h1", "m1", 1, IngestionStatus.Succeeded, DateTimeOffset.UtcNow, ["c1"]);
+                await stateStore.SaveAsync(doc);
+            }
+
+            // Verify user_version is 2
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version;";
+                Assert.Equal(2, Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            // 2. Open Vector Store subsequently on the same DB
+            using (var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = connStr,
+                Dimensions = 2,
+                EmbeddingModel = "test-model"
+            }))
+            {
+                var meta = new DocumentMetadata("d1", "silo", "dept", "off", "conf", "type", 2024, "auth", new DateOnly(2024, 1, 1), "title");
+                var chunk = new EmbeddedChunk(new DocumentChunk("c1", "d1", 0, "text", 0, 4, meta), new float[] { 1f, 0f }, "test-model");
+                await vectorStore.UpsertAsync([chunk]);
+
+                var res = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 1);
+                Assert.Single(res);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) File.Delete(tempDb); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task VectorStoreFirst_StateStoreUsesSameSchema()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_vectorstore_first_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            // 1. Open Vector Store first on fresh DB
+            using (var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = connStr,
+                Dimensions = 2,
+                EmbeddingModel = "test-model"
+            }))
+            {
+                var meta = new DocumentMetadata("d1", "silo", "dept", "off", "conf", "type", 2024, "auth", new DateOnly(2024, 1, 1), "title");
+                var chunk = new EmbeddedChunk(new DocumentChunk("c1", "d1", 0, "text", 0, 4, meta), new float[] { 1f, 0f }, "test-model");
+                await vectorStore.UpsertAsync([chunk]);
+            }
+
+            // Verify user_version is 2
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version;";
+                Assert.Equal(2, Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            // 2. Open State Store subsequently on the same DB
+            using (var stateStore = new SqliteIngestionStateStore(connStr))
+            {
+                var doc = new IngestionDocumentState("default", "d1", "h1", "m1", 1, IngestionStatus.Succeeded, DateTimeOffset.UtcNow, ["c1"]);
+                await stateStore.SaveAsync(doc);
+
+                var retrieved = await stateStore.GetAsync("d1");
+                Assert.NotNull(retrieved);
+                Assert.Equal(1, retrieved.Version);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) File.Delete(tempDb); } catch { }
+        }
+    }
+
+    [Fact]
+    public void UnsupportedSchemaVersion_FailsFromStateStore()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_unsupported_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version = 99;";
+                cmd.ExecuteNonQuery();
+            }
+
+            var ex = Assert.Throws<InvalidOperationException>(() => new SqliteIngestionStateStore(connStr));
+            Assert.Contains("Unsupported Pigmentor SQLite schema version 99", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) File.Delete(tempDb); } catch { }
+        }
+    }
+
+    [Fact]
+    public void UnsupportedSchemaVersion_FailsFromVectorStore()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_unsupported_vec_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version = 99;";
+                cmd.ExecuteNonQuery();
+            }
+
+            var ex = Assert.Throws<InvalidOperationException>(() => new SqliteVecStore(new SqliteVecStoreOptions
+            {
+                ConnectionString = connStr,
+                Dimensions = 2,
+                EmbeddingModel = "test-model"
+            }));
+            Assert.Contains("Unsupported Pigmentor SQLite schema version 99", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) File.Delete(tempDb); } catch { }
+        }
+    }
+
+    [Fact]
+    public void UnversionedDatabaseWithTables_FailsFromStateStore()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), $"schema_unversioned_{Guid.NewGuid():N}.db");
+        var connStr = $"Data Source={tempDb}";
+        try
+        {
+            using (var conn = new SqliteConnection(connStr))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "CREATE TABLE foreign_table (id INTEGER PRIMARY KEY, data TEXT);";
+                cmd.ExecuteNonQuery();
+            }
+
+            var ex = Assert.Throws<InvalidOperationException>(() => new SqliteIngestionStateStore(connStr));
+            Assert.Contains("Cannot open unversioned SQLite database with existing tables", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(tempDb)) File.Delete(tempDb); } catch { }
+        }
+    }
+
+    // --- 10. Retry, Version Guarding & Scope Collision Tests ---
+
+    [Fact]
+    public async Task FailedAttempt_RetriesSameVersion_SuccessfullyCompletes()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        var flakyEmbedder = new FlakyEmbeddingService { ShouldFail = true };
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), flakyEmbedder);
+
+        var doc = CreateDocument("doc-retry", "Content to be ingested.");
+
+        // First attempt fails during embedding
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.IngestAsync(doc));
+        Assert.Equal("Simulated embedding transient failure.", ex.Message);
+
+        // State in DB is Failed, Version 1
+        var failedState = await stateStore.GetAsync("doc-retry");
+        Assert.NotNull(failedState);
+        Assert.Equal(1, failedState.Version);
+        Assert.Equal(IngestionStatus.Failed, failedState.Status);
+
+        // Second attempt retries: embedder succeeds
+        flakyEmbedder.ShouldFail = false;
+        var result = await service.IngestAsync(doc);
+
+        // Result has Version 1 (version was NOT inflated to 2 on retry)
+        Assert.Equal(1, result.Version);
+        Assert.Equal(IngestionStatus.Succeeded, result.Status);
+        Assert.False(result.Skipped);
+
+        // State in DB is now Succeeded at Version 1
+        var succeededState = await stateStore.GetAsync("doc-retry");
+        Assert.NotNull(succeededState);
+        Assert.Equal(1, succeededState.Version);
+        Assert.Equal(IngestionStatus.Succeeded, succeededState.Status);
+        Assert.NotNull(succeededState.LastSuccessfulIngestion);
+    }
+
+    [Fact]
+    public async Task StaleExplicitVersion_Throws()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        // Document at version 5
+        await stateStore.SaveAsync(new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-explicit-stale",
+            ContentHash: "h5",
+            MetadataHash: "m5",
+            Version: 5,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c5"]));
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+        var doc = CreateDocument("doc-explicit-stale", "Content v3");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.IngestAsync(doc, explicitVersion: 3));
+        Assert.Contains("Downgrading version is rejected", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DuplicateExplicitVersion_SucceededSkips_ChangedThrows()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        var doc = CreateDocument("doc-explicit-dup", "Content v5");
+        var cHash = IngestionFingerprint.ComputeContentHash(doc.Content);
+        var mHash = IngestionFingerprint.ComputeMetadataHash(doc.Metadata);
+
+        // Document at version 5 Succeeded
+        await stateStore.SaveAsync(new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-explicit-dup",
+            ContentHash: cHash,
+            MetadataHash: mHash,
+            Version: 5,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c5"]));
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+
+        // Same content with same explicitVersion = 5 -> skips cleanly
+        var skipRes = await service.IngestAsync(doc, explicitVersion: 5);
+        Assert.True(skipRes.Skipped);
+        Assert.Equal(5, skipRes.Version);
+
+        // Modified content with duplicate explicitVersion = 5 -> throws
+        var changedDoc = CreateDocument("doc-explicit-dup", "Changed content v5");
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.IngestAsync(changedDoc, explicitVersion: 5));
+        Assert.Contains("duplicate explicit version 5", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NewerExplicitVersion_Accepted()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        // Document at version 2
+        await stateStore.SaveAsync(new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-explicit-newer",
+            ContentHash: "h2",
+            MetadataHash: "m2",
+            Version: 2,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c2"]));
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+        var doc = CreateDocument("doc-explicit-newer", "Content updated to v5");
+
+        var result = await service.IngestAsync(doc, explicitVersion: 5);
+        Assert.False(result.Skipped);
+        Assert.Equal(5, result.Version);
+        Assert.Equal(IngestionStatus.Succeeded, result.Status);
+
+        var saved = await stateStore.GetAsync("doc-explicit-newer");
+        Assert.NotNull(saved);
+        Assert.Equal(5, saved.Version);
+    }
+
+    [Fact]
+    public async Task DocumentId_CrossSourceScopeCollision_Throws()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+
+        var doc = CreateDocument("doc-scope-collision", "Content");
+
+        // Ingest under source scope 'source-A'
+        var resA = await service.IngestAsync(doc, sourceId: "source-A");
+        Assert.Equal(IngestionStatus.Succeeded, resA.Status);
+
+        // Attempting to ingest same doc under source scope 'source-B' throws collision exception
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.IngestAsync(doc, sourceId: "source-B"));
+        Assert.Contains("already registered in synchronization scope 'source-A'", ex.Message, StringComparison.Ordinal);
+    }
+
     private sealed class ActionReingestService : IDocumentReingestService
     {
         private readonly Action _onReingest;
@@ -702,6 +1660,41 @@ public sealed class IngestionStateTests : IDisposable
         public Task<EmbeddedChunk> EmbedAsync(DocumentChunk chunk, CancellationToken cancellationToken = default)
         {
             CallCount++;
+            var vec = new float[Dimensions];
+            vec[0] = 1f;
+            return Task.FromResult(new EmbeddedChunk(chunk, vec, EmbeddingModel));
+        }
+
+        public Task<ReadOnlyMemory<float>> EmbedQueryAsync(string query, CancellationToken cancellationToken = default)
+        {
+            var vec = new float[Dimensions];
+            vec[0] = 1f;
+            return Task.FromResult<ReadOnlyMemory<float>>(vec);
+        }
+
+        public async IAsyncEnumerable<EmbeddedChunk> EmbedAsync(
+            IAsyncEnumerable<DocumentChunk> chunks,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await foreach (var chunk in chunks.WithCancellation(cancellationToken))
+            {
+                yield return await EmbedAsync(chunk, cancellationToken);
+            }
+        }
+    }
+
+    private sealed class FlakyEmbeddingService : IEmbeddingService
+    {
+        public bool ShouldFail { get; set; } = true;
+        public int Dimensions => 2;
+        public string EmbeddingModel => "test-model";
+
+        public Task<EmbeddedChunk> EmbedAsync(DocumentChunk chunk, CancellationToken cancellationToken = default)
+        {
+            if (ShouldFail)
+            {
+                throw new InvalidOperationException("Simulated embedding transient failure.");
+            }
             var vec = new float[Dimensions];
             vec[0] = 1f;
             return Task.FromResult(new EmbeddedChunk(chunk, vec, EmbeddingModel));

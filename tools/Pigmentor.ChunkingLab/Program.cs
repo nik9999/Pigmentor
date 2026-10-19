@@ -1,11 +1,11 @@
 using System.Text.Json;
 using DocumentFormat.OpenXml.Packaging;
 using ExcelDataReader;
-using UglyToad.PdfPig;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
 using Pigmentor.Core.Tokens;
 using Pigmentor.Ingestion.Chunking;
+using UglyToad.PdfPig;
 
 var options = LabOptions.Parse(args);
 var repositoryRoot = FindRepositoryRoot();

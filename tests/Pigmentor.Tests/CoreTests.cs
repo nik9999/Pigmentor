@@ -1,7 +1,7 @@
-using Pigmentor.Core.Numerics;
 using Pigmentor.Core.Documents;
-using Pigmentor.Ingestion.Chunking;
+using Pigmentor.Core.Numerics;
 using Pigmentor.Ingestion;
+using Pigmentor.Ingestion.Chunking;
 
 namespace Pigmentor.Tests;
 

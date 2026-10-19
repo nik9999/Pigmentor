@@ -26,7 +26,7 @@ public sealed record IngestionResult(
 /// <summary>
 /// Result of a bulk synchronization between a source document collection and the persistent state.
 /// </summary>
-/// <param name="SourceId">Logical source or partition identifier.</param>
+/// <param name="SourceId">Logical ingestion source or synchronization scope.</param>
 /// <param name="TotalSourceDocuments">Total count of source documents processed in the sync snapshot.</param>
 /// <param name="Ingested">Count of new documents ingested.</param>
 /// <param name="Updated">Count of changed documents updated.</param>
@@ -45,6 +45,18 @@ public sealed record SyncResult(
 /// <summary>
 /// High-level restart-safe ingestion service that coordinates persistent ingestion state,
 /// chunking, embedding, vector store upsertion, and orphan chunk cleanup.
+///
+/// <para>
+/// <strong>Atomicity guarantee:</strong> Ingestion operations across the vector store and state store
+/// are <strong>RECOVERABLE BUT NOT FULLY ATOMIC</strong>. Persisted <see cref="IngestionStatus.Processing"/>
+/// and <see cref="IngestionStatus.Failed"/> states ensure that an interrupted or crashed attempt is
+/// deterministically repaired upon restart or subsequent sync.
+/// </para>
+/// <para>
+/// <strong>Synchronization scope:</strong> <c>sourceId</c> defines the authoritative synchronization scope
+/// for document lifecycle and deletions. It does not provide database-level tenant, security, or vector namespace isolation.
+/// <c>DocumentId</c> and <c>ChunkId</c> must be globally unique per database.
+/// </para>
 /// </summary>
 public interface IDocumentIngestionService
 {

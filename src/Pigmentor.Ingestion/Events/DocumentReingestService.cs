@@ -49,8 +49,11 @@ public sealed class DocumentReingestService : IDocumentReingestService
         new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Create the re-ingest service with vector store and embedding service.
+    /// Legacy constructor that uses an in-memory dictionary for chunk tracking.
+    /// Non-restart-safe: chunk associations are lost upon process restart, potentially leaving orphan chunks.
+    /// Use <see cref="DocumentReingestService(Func{string, CancellationToken, Task{IReadOnlyList{DocumentChunk}}}, IEmbeddingService, IVectorStore, IIngestionStateStore)"/> for restart safety.
     /// </summary>
+    [Obsolete("Use constructor accepting IIngestionStateStore for restart-safe chunk tracking.", false)]
     public DocumentReingestService(
         Func<string, CancellationToken, Task<IReadOnlyList<DocumentChunk>>> rechunk,
         IEmbeddingService embedder,
