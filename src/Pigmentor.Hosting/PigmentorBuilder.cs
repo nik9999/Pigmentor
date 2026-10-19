@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Pigmentor.Generation;
 
 namespace Pigmentor.Hosting;
 
@@ -26,5 +27,16 @@ public sealed class PigmentorBuilder
         Services = services ?? throw new ArgumentNullException(nameof(services));
         Configuration = configuration;
     }
-}
 
+    /// <summary>
+    /// Configures runtime settings for <see cref="IRagPipeline"/>.
+    /// </summary>
+    /// <param name="configure">Delegate to configure <see cref="RagPipelineSettings"/>.</param>
+    /// <returns>This builder for chaining.</returns>
+    public PigmentorBuilder ConfigureRagPipeline(Action<RagPipelineSettings> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        Services.Configure(configure);
+        return this;
+    }
+}

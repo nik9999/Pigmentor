@@ -54,6 +54,32 @@ Use `Embedding:Provider = Onnx` for a local BGE-M3 backend. Set both
 `Embedding:ModelPath` and `Embedding:TokenizerPath`; BGE-M3 requires the
 converted ONNX graph and its compatible tokenizer bundle.
 
+## RAG Pipeline Execution
+
+The generation pipeline (`IRagPipeline`) orchestrates retrieval with metadata filtering, reranking, token budgeting, prompt injection defense, generation, and citation mapping:
+
+```csharp
+// Fluent RAG configuration
+services.AddPigmentor(configuration)
+    .UseOllama(new Uri("http://localhost:11434"), chatModel: "llama3.2")
+    .ConfigureRagPipeline(settings =>
+    {
+        settings.DefaultTopK = 5;
+        settings.Budget = new ContextBudget(MaxTotalTokens: 4096, ReservedOutputTokens: 1024);
+    });
+
+// Complete response
+var response = await pipeline.AskAsync(new RagRequest("What are the indexing guarantees?", topK: 5));
+Console.WriteLine(response.Answer);
+
+// Streaming response
+await foreach (var evt in pipeline.AskStreamingAsync(new RagRequest("Streaming question?")))
+{
+    if (evt is RagTextDelta delta) Console.Write(delta.Text);
+    else if (evt is RagCompleted completed) Console.WriteLine($"\nCitations: {completed.Response.Citations.Count}");
+}
+```
+
 ## Run
 
 ```powershell

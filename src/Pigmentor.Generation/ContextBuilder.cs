@@ -25,7 +25,9 @@ public sealed class ContextBuilder : IContextBuilder
     /// <inheritdoc />
     public RagContext BuildContext(
         IReadOnlyList<RetrievalResult> candidates,
-        int maxTokens) => BuildContext(candidates, new ContextBudget(maxTokens, 0));
+        int maxTokens) => maxTokens <= 0 || candidates.Count == 0
+            ? RagContext.Empty
+            : BuildContext(candidates, new ContextBudget(maxTokens, 0));
 
     /// <inheritdoc />
     public RagContext BuildContext(
@@ -56,23 +58,24 @@ public sealed class ContextBuilder : IContextBuilder
                 selected.Add(candidate);
                 currentTokenCount += separatorTokens + blockTokens;
             }
-            else
+            else if (_options.OversizedBehavior == OversizedChunkBehavior.Truncate)
             {
-                if (_options.OversizedBehavior == OversizedChunkBehavior.Truncate)
+                var maxBlockTokens = availableTokens - currentTokenCount - separatorTokens;
+                var headerTokens = _tokenCounter.CountTokens(FormatSourceHeader(nextSourceId, candidate.Chunk));
+                if (maxBlockTokens > headerTokens + 5) // ensure at least a few tokens for body
                 {
-                    var maxBlockTokens = availableTokens - currentTokenCount - separatorTokens;
-                    var headerTokens = _tokenCounter.CountTokens(FormatSourceHeader(nextSourceId, candidate.Chunk));
-                    if (maxBlockTokens > headerTokens + 5) // ensure at least a few tokens for body
+                    var truncatedChunk = TruncateChunk(candidate.Chunk, nextSourceId, maxBlockTokens);
+                    if (!string.IsNullOrEmpty(truncatedChunk.Text))
                     {
-                        var truncatedChunk = TruncateChunk(candidate.Chunk, nextSourceId, maxBlockTokens);
-                        if (!string.IsNullOrEmpty(truncatedChunk.Text))
-                        {
-                            selected.Add(new RetrievalResult(truncatedChunk, candidate.Score));
-                        }
+                        selected.Add(new RetrievalResult(truncatedChunk, candidate.Score));
                     }
                 }
-                // Once budget cannot fit the next candidate, stop adding further chunks
                 break;
+            }
+            else
+            {
+                // OversizedChunkBehavior.Drop: skip oversized chunk without truncation (§6)
+                continue;
             }
         }
 
@@ -82,31 +85,49 @@ public sealed class ContextBuilder : IContextBuilder
         }
 
         // 2. Ordering: apply ContextOrdering.Interleave if enabled and multiple sources
-        IReadOnlyList<RetrievalResult> ordered = _options.EnableInterleaving && selected.Count > 1
+        var orderedList = (_options.EnableInterleaving && selected.Count > 1
             ? ContextOrdering.Interleave(selected)
-            : selected;
+            : selected).ToList();
 
         // 3. Source formatting with stable [S1], [S2] tags and SourceMap population
-        var sourceMap = new Dictionary<string, RetrievalResult>(ordered.Count, StringComparer.OrdinalIgnoreCase);
+        var (formattedContext, tokenCount, sourceMap) = FormatContext(orderedList);
+
+        // 4. Strict budget invariant guard: tokenCount must never exceed availableTokens (§5)
+        while (tokenCount > availableTokens && orderedList.Count > 0)
+        {
+            orderedList.RemoveAt(orderedList.Count - 1);
+            if (orderedList.Count == 0)
+            {
+                return RagContext.Empty;
+            }
+            (formattedContext, tokenCount, sourceMap) = FormatContext(orderedList);
+        }
+
+        return new RagContext(formattedContext, orderedList, tokenCount, sourceMap);
+    }
+
+    private (string FormattedContext, int TokenCount, Dictionary<string, RetrievalResult> SourceMap) FormatContext(
+        List<RetrievalResult> sources)
+    {
+        var sourceMap = new Dictionary<string, RetrievalResult>(sources.Count, StringComparer.OrdinalIgnoreCase);
         var sb = new StringBuilder();
 
-        for (var i = 0; i < ordered.Count; i++)
+        for (var i = 0; i < sources.Count; i++)
         {
             var sourceId = $"S{i + 1}";
-            sourceMap[sourceId] = ordered[i];
+            sourceMap[sourceId] = sources[i];
 
             if (sb.Length > 0)
             {
                 sb.Append("\n\n");
             }
 
-            sb.Append(FormatSource(sourceId, ordered[i].Chunk));
+            sb.Append(FormatSource(sourceId, sources[i].Chunk));
         }
 
-        var formattedContext = sb.ToString();
-        var tokenCount = _tokenCounter.CountTokens(formattedContext);
-
-        return new RagContext(formattedContext, ordered, tokenCount, sourceMap);
+        var formatted = sb.ToString();
+        var tokens = _tokenCounter.CountTokens(formatted);
+        return (formatted, tokens, sourceMap);
     }
 
     private static string FormatSource(string sourceId, DocumentChunk chunk)

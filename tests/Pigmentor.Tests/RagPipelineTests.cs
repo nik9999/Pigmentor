@@ -415,6 +415,452 @@ public sealed class RagPipelineTests
     }
 
     [Fact]
+    public async Task EndToEnd_CanonicalRagFlow_SuccessfullyExecuted()
+    {
+        var meta1 = new DocumentMetadata("doc-1", Silo: "Engineering", "", "", "", "Spec", 2026, "Author", DateOnly.MinValue, "Doc 1");
+        var meta2 = new DocumentMetadata("doc-2", Silo: "Engineering", "", "", "", "Guide", 2026, "Author", DateOnly.MinValue, "Doc 2");
+        var meta3 = new DocumentMetadata("doc-3", Silo: "HR", "", "", "", "Policy", 2026, "Author", DateOnly.MinValue, "Doc 3");
+
+        var candidates = new List<RetrievalResult>
+        {
+            new(new DocumentChunk("doc-1#0", "doc-1", 0, "Chunk 1 content.", 0, 16, meta1), 0.95),
+            new(new DocumentChunk("doc-2#0", "doc-2", 0, "Chunk 2 content.", 0, 16, meta2), 0.90),
+            new(new DocumentChunk("doc-3#0", "doc-3", 0, "Chunk 3 content.", 0, 16, meta3), 0.85)
+        };
+
+        var retriever = new FakeRetriever(candidates);
+        var chat = new FakeChatGenerator("According to [S1] and [S2], the architecture is sound.");
+        var counter = new TokenCounter();
+        var recordingReranker = new RecordingReranker();
+
+        var pipeline = new RagPipeline(
+            retriever,
+            chat,
+            reranker: recordingReranker,
+            tokenCounter: counter,
+            settings: new RagPipelineSettings
+            {
+                DefaultTopK = 5,
+                Budget = new ContextBudget(MaxTotalTokens: 500, ReservedOutputTokens: 100)
+            });
+
+        var request = new RagRequest(
+            "What is the architecture?",
+            topK: 2,
+            metadataFilter: MetadataFilter.Where(m => m.Silo == "Engineering"));
+
+        var response = await pipeline.AskAsync(request);
+
+        Assert.Equal("According to [S1] and [S2], the architecture is sound.", response.Answer);
+        Assert.Equal(2, response.Sources.Count);
+        Assert.Equal(2, response.Citations.Count);
+        Assert.Equal("S1", response.Citations[0].Label);
+        Assert.Equal("S2", response.Citations[1].Label);
+        Assert.Equal("doc-1#0", response.Citations[0].ChunkId);
+        Assert.Equal("doc-2#0", response.Citations[1].ChunkId);
+
+        // Diagnostics verification
+        Assert.Equal(2, response.Diagnostics.RetrievedCandidateCount);
+        Assert.Equal(2, response.Diagnostics.FilteredCandidateCount);
+        Assert.Equal(2, response.Diagnostics.RerankedCandidateCount);
+        Assert.Equal(2, response.Diagnostics.ContextSourceCount);
+        Assert.NotNull(response.Diagnostics.ContextTokenCount);
+        Assert.True(response.Diagnostics.ContextTokenCount > 0);
+        Assert.True(response.Diagnostics.PromptTokenCount > 0);
+        Assert.Equal(2, response.Diagnostics.ValidCitationCount);
+        Assert.Equal(0, response.Diagnostics.InvalidCitationCount);
+        Assert.Equal(2, response.Diagnostics.CitedTagCount);
+        Assert.True(response.Diagnostics.RetrievalLatency >= TimeSpan.Zero);
+        Assert.True(response.Diagnostics.GenerationLatency >= TimeSpan.Zero);
+        Assert.True(response.Diagnostics.TotalLatency >= TimeSpan.Zero);
+    }
+
+    [Fact]
+    public async Task NoContext_RetrieverReturnsEmpty_ProducesNoSourcesAndDeterministicMessage()
+    {
+        var retriever = new FakeRetriever([]);
+        var chat = new FakeChatGenerator("No relevant information found.");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var response = await pipeline.AskAsync(new RagRequest("Unknown concept?"));
+
+        Assert.Equal("No relevant information found.", response.Answer);
+        Assert.Empty(response.Sources);
+        Assert.Empty(response.Citations);
+        Assert.Equal(0, response.Diagnostics.RetrievedCandidateCount);
+        Assert.Equal(0, response.Diagnostics.ContextSourceCount);
+        Assert.Null(response.Diagnostics.ContextTokenCount);
+        Assert.Equal(0, response.Diagnostics.ValidCitationCount);
+        Assert.Equal(0, response.Diagnostics.InvalidCitationCount);
+        Assert.Equal(0, response.Diagnostics.CitedTagCount);
+    }
+
+    [Fact]
+    public async Task InvalidAndDuplicateCitations_DeterministicValidation()
+    {
+        var meta1 = new DocumentMetadata("doc-1", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc 1");
+        var meta2 = new DocumentMetadata("doc-2", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc 2");
+        var chunk1 = new DocumentChunk("doc-1#0", "doc-1", 0, "Chunk 1", 0, 7, meta1);
+        var chunk2 = new DocumentChunk("doc-2#0", "doc-2", 0, "Chunk 2", 0, 7, meta2);
+
+        var retriever = new FakeRetriever([new RetrievalResult(chunk1, 0.9), new RetrievalResult(chunk2, 0.8)]);
+        // Answer has lower case [s1], duplicate [S1], valid [S2], unknown [S99], invalid [S0], and duplicate [S99]
+        var chat = new FakeChatGenerator("Fact from [s1] and again [S1]. Another from [S2]. Hallucination [S99], [S0], and repeat [S99].");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var response = await pipeline.AskAsync(new RagRequest("Query"));
+
+        // Only valid distinct citations S1 and S2 must survive in order of first appearance
+        Assert.Equal(2, response.Citations.Count);
+        Assert.Equal("S1", response.Citations[0].Label);
+        Assert.Equal("doc-1#0", response.Citations[0].ChunkId);
+        Assert.Equal("S2", response.Citations[1].Label);
+        Assert.Equal("doc-2#0", response.Citations[1].ChunkId);
+
+        // Diagnostics
+        Assert.Equal(2, response.Diagnostics.ValidCitationCount);
+        Assert.Equal(2, response.Diagnostics.InvalidCitationCount); // S99 and S0
+        Assert.Equal(4, response.Diagnostics.CitedTagCount);
+    }
+
+    [Fact]
+    public async Task BudgetConstraint_OnlyFittingSourcesAdmitted_AndInvariantHolds()
+    {
+        var counter = new TokenCounter();
+        var metadata = new DocumentMetadata("doc", "", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
+        var candidates = Enumerable.Range(0, 10).Select(i =>
+        {
+            var chunk = new DocumentChunk($"doc#{i}", "doc", i, $"Detailed content text paragraph for chunk {i}.", 0, 40, metadata);
+            return new RetrievalResult(chunk, 1.0 - i * 0.05);
+        }).ToList();
+
+        var retriever = new FakeRetriever(candidates);
+        var chat = new FakeChatGenerator("Answer text [S1]");
+
+        var budget = new ContextBudget(MaxTotalTokens: 300, ReservedOutputTokens: 50);
+        var settings = new RagPipelineSettings { Budget = budget };
+
+        var pipeline = new RagPipeline(retriever, chat, tokenCounter: counter, settings: settings);
+        var response = await pipeline.AskAsync(new RagRequest("Question", topK: 10));
+
+        Assert.Equal(10, response.Diagnostics.RetrievedCandidateCount);
+        Assert.True(response.Diagnostics.ContextSourceCount < 10);
+        Assert.True(response.Diagnostics.ContextSourceCount > 0);
+        Assert.NotNull(response.Diagnostics.ContextTokenCount);
+
+        var promptOverhead = counter.CountTokens(RagPromptBuilder.BuildPrompt("Question", RagContext.Empty));
+        var contextAllowance = budget.ComputeAvailableContextTokens(promptOverhead);
+
+        // Invariant: ContextTokenCount must not exceed context allowance
+        Assert.True(response.Diagnostics.ContextTokenCount <= contextAllowance);
+        Assert.True(response.Diagnostics.PromptTokenCount <= budget.MaxInputTokens);
+    }
+
+    [Fact]
+    public async Task RagResponseInvariant_AllCitationsReferenceContextSources()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
+        var chunk1 = new DocumentChunk("doc-1#0", "doc-1", 0, "Alpha", 0, 5, meta);
+        var chunk2 = new DocumentChunk("doc-1#1", "doc-1", 1, "Beta", 0, 4, meta);
+
+        var retriever = new FakeRetriever([new RetrievalResult(chunk1, 0.9), new RetrievalResult(chunk2, 0.8)]);
+        var chat = new FakeChatGenerator("Reference [S1] and [S2] and unknown [S50].");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var response = await pipeline.AskAsync(new RagRequest("Test"));
+
+        Assert.NotEmpty(response.Citations);
+        foreach (var citation in response.Citations)
+        {
+            Assert.Contains(response.Sources, s => s.Chunk.ChunkId == citation.ChunkId);
+            Assert.Contains(response.Sources, s => s.Chunk.DocumentId == citation.DocumentId);
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\r\n\t  ")]
+    public async Task EmptyAndWhitespaceAnswer_DoesNotFail_ReturnsEmptyCitations(string emptyReply)
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Chunk text", 0, 10, meta);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+        var chat = new FakeChatGenerator(emptyReply);
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var response = await pipeline.AskAsync(new RagRequest("Test query"));
+
+        Assert.Equal(string.Empty, response.Answer);
+        Assert.Empty(response.Citations);
+        Assert.Equal(0, response.Diagnostics.ValidCitationCount);
+        Assert.Equal(0, response.Diagnostics.InvalidCitationCount);
+        Assert.Equal(0, response.Diagnostics.CitedTagCount);
+    }
+
+    [Fact]
+    public async Task ProviderException_PropagatesWithoutFakeResponse()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Chunk text", 0, 10, meta);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+
+        var expectedException = new InvalidOperationException("Upstream LLM rate limit or connection timeout.");
+        var chat = new FakeChatGenerator("dummy", exceptionToThrow: expectedException);
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => pipeline.AskAsync(new RagRequest("Query")));
+        Assert.Same(expectedException, thrown);
+    }
+
+    [Fact]
+    public async Task Cancellation_PropagatesDuringRetrievalAndGeneration()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var retriever = new FakeRetriever();
+        var chat = new FakeChatGenerator("Answer");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        // Pre-cancelled
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            pipeline.AskAsync(new RagRequest("Query"), cts.Token));
+
+        // Cancelled during retrieval
+        var throwingRetriever = new FakeRetriever(exceptionToThrow: new OperationCanceledException());
+        var pipeline2 = new RagPipeline(throwingRetriever, chat);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            pipeline2.AskAsync(new RagRequest("Query")));
+
+        // Cancelled during generation
+        var throwingChat = new FakeChatGenerator("dummy", exceptionToThrow: new OperationCanceledException());
+        var pipeline3 = new RagPipeline(retriever, throwingChat);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            pipeline3.AskAsync(new RagRequest("Query")));
+    }
+
+    [Fact]
+    public async Task Streaming_YieldsDeltasAndTerminatesWithRagCompleted()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc 1");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Pigmentor streaming architecture.", 0, 32, meta);
+
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+        var streamingChat = new FakeStreamingChatGenerator(["Pigmentor ", "supports ", "streaming ", "[S1]."]);
+        var pipeline = new RagPipeline(retriever, streamingChat);
+
+        var events = new List<RagStreamEvent>();
+        await foreach (var evt in pipeline.AskStreamingAsync("How does Pigmentor stream?"))
+        {
+            events.Add(evt);
+        }
+
+        // Must have 4 RagTextDelta followed by 1 RagCompleted
+        Assert.Equal(5, events.Count);
+
+        var deltas = events.OfType<RagTextDelta>().Select(d => d.Text).ToList();
+        Assert.Equal(["Pigmentor ", "supports ", "streaming ", "[S1]."], deltas);
+
+        var completed = Assert.IsType<RagCompleted>(events[^1]);
+        Assert.Equal("Pigmentor supports streaming [S1].", completed.Response.Answer);
+        Assert.Single(completed.Response.Sources);
+        Assert.Single(completed.Response.Citations);
+        Assert.Equal("S1", completed.Response.Citations[0].Label);
+        Assert.Equal("doc-1#0", completed.Response.Citations[0].ChunkId);
+        Assert.Equal(1, completed.Response.Diagnostics.ValidCitationCount);
+        Assert.Equal(0, completed.Response.Diagnostics.InvalidCitationCount);
+    }
+
+    [Fact]
+    public async Task Streaming_ProviderFailure_DoesNotEmitCompleted()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc 1");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Content.", 0, 8, meta);
+
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+        var expectedEx = new InvalidOperationException("Stream severed mid-generation");
+        var streamingChat = new FakeStreamingChatGenerator(["Delta 1, ", "Delta 2, "], exceptionToThrow: expectedEx, throwAfterChunkIndex: 0);
+        var pipeline = new RagPipeline(retriever, streamingChat);
+
+        var events = new List<RagStreamEvent>();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var evt in pipeline.AskStreamingAsync("Test"))
+            {
+                events.Add(evt);
+            }
+        });
+
+        Assert.Same(expectedEx, ex);
+        // We received the first delta, but RagCompleted was never emitted
+        Assert.Single(events);
+        Assert.IsType<RagTextDelta>(events[0]);
+        Assert.DoesNotContain(events, e => e is RagCompleted);
+    }
+
+    [Fact]
+    public async Task Streaming_Cancellation_StopsEnumeration()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc 1");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Content.", 0, 8, meta);
+
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+        var streamingChat = new FakeStreamingChatGenerator(["Chunk 1", "Chunk 2", "Chunk 3"]);
+        var pipeline = new RagPipeline(retriever, streamingChat);
+
+        using var cts = new CancellationTokenSource();
+
+        var events = new List<RagStreamEvent>();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var evt in pipeline.AskStreamingAsync(new RagRequest("Test"), cts.Token))
+            {
+                events.Add(evt);
+                cts.Cancel(); // cancel after first event
+            }
+        });
+
+        Assert.NotEmpty(events);
+        Assert.DoesNotContain(events, e => e is RagCompleted);
+    }
+
+    [Fact]
+    public async Task AskStreamingAsync_WorksWithIChatClientConstructor()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Title", 0, "", DateOnly.MinValue, "Doc");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Chat client content", 0, 19, meta);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+
+        var client = new TestChatClient(
+            "Response from client [S1]",
+            streamingChunks: ["Response ", "from ", "client ", "[S1]"]);
+        var pipeline = new RagPipeline(retriever, client);
+
+        var events = new List<RagStreamEvent>();
+        await foreach (var evt in pipeline.AskStreamingAsync("Streaming test"))
+        {
+            events.Add(evt);
+        }
+
+        var deltas = events.OfType<RagTextDelta>().Select(d => d.Text).ToList();
+        Assert.Equal(["Response ", "from ", "client ", "[S1]"], deltas);
+        var completed = Assert.IsType<RagCompleted>(events[^1]);
+        Assert.Equal("Response from client [S1]", completed.Response.Answer);
+        Assert.Single(completed.Response.Citations);
+    }
+
+    [Fact]
+    public void ContextBuilder_Boundary_ExactlyFits()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Title", 0, "", DateOnly.MinValue, "Doc Title");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Sample content", 0, 14, meta);
+        var candidate = new RetrievalResult(chunk, 1.0);
+
+        var exactCounter = new ExactTokenCounter(s => s.Length);
+        var builder = new ContextBuilder(exactCounter);
+
+        var probe = builder.BuildContext([candidate], 1000);
+        var exactTokens = probe.TokenCount;
+        Assert.True(exactTokens > 0);
+
+        var context = builder.BuildContext([candidate], exactTokens);
+
+        Assert.Single(context.Sources);
+        Assert.Equal(exactTokens, context.TokenCount);
+        Assert.Equal("doc-1#0", context.Sources[0].Chunk.ChunkId);
+    }
+
+    [Fact]
+    public void ContextBuilder_Boundary_OneTokenOver_Dropped()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Title", 0, "", DateOnly.MinValue, "Doc Title");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Sample content", 0, 14, meta);
+        var candidate = new RetrievalResult(chunk, 1.0);
+
+        var exactCounter = new ExactTokenCounter(s => s.Length);
+        var builder = new ContextBuilder(exactCounter, new ContextBuilderOptions
+        {
+            OversizedBehavior = OversizedChunkBehavior.Drop
+        });
+
+        var probe = builder.BuildContext([candidate], 1000);
+        var exactTokens = probe.TokenCount;
+        Assert.True(exactTokens > 0);
+
+        // One token short of fitting
+        var context = builder.BuildContext([candidate], exactTokens - 1);
+
+        Assert.Empty(context.Sources);
+        Assert.Equal(0, context.TokenCount);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-100)]
+    public void ContextBuilder_Boundary_ZeroAllowance(int zeroOrNegativeAllowance)
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Title", 0, "", DateOnly.MinValue, "Title");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Content", 0, 7, meta);
+        var candidate = new RetrievalResult(chunk, 1.0);
+
+        var counter = new TokenCounter();
+        var builder = new ContextBuilder(counter);
+
+        var context = builder.BuildContext([candidate], zeroOrNegativeAllowance);
+
+        Assert.Same(RagContext.Empty, context);
+        Assert.Empty(context.Sources);
+        Assert.Equal(0, context.TokenCount);
+    }
+
+    [Fact]
+    public void ContextBuilder_Boundary_VeryLongFirstChunk_AllowsSubsequentSmallerChunk()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Title", 0, "", DateOnly.MinValue, "Doc Title");
+        var bigChunk = new DocumentChunk("big#0", "big", 0, new string('A', 500), 0, 500, meta);
+        var smallChunk = new DocumentChunk("small#0", "small", 0, "Small", 0, 5, meta);
+
+        var candidate1 = new RetrievalResult(bigChunk, 1.0);
+        var candidate2 = new RetrievalResult(smallChunk, 0.9);
+
+        var exactCounter = new ExactTokenCounter(s => s.Length);
+        var builder = new ContextBuilder(exactCounter, new ContextBuilderOptions
+        {
+            OversizedBehavior = OversizedChunkBehavior.Drop
+        });
+
+        var smallProbe = builder.BuildContext([candidate2], 1000);
+        var smallTokens = smallProbe.TokenCount;
+        Assert.True(smallTokens > 0);
+
+        // Allowance: exactly enough for small chunk, far too small for big chunk (>500 tokens)
+        var context = builder.BuildContext([candidate1, candidate2], smallTokens);
+
+        Assert.Single(context.Sources);
+        Assert.Equal("small#0", context.Sources[0].Chunk.ChunkId);
+        Assert.Equal(smallTokens, context.TokenCount);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-10)]
+    public void SettingsValidation_FailsFastOnInvalidValues(int invalidTopK)
+    {
+        var settings = new RagPipelineSettings();
+        Assert.Throws<ArgumentOutOfRangeException>(() => settings.DefaultTopK = invalidTopK);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ContextBudget(MaxTotalTokens: 0, ReservedOutputTokens: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ContextBudget(MaxTotalTokens: -10, ReservedOutputTokens: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ContextBudget(MaxTotalTokens: 100, ReservedOutputTokens: -1));
+        Assert.Throws<ArgumentException>(() => new ContextBudget(MaxTotalTokens: 100, ReservedOutputTokens: 100));
+        Assert.Throws<ArgumentException>(() => new ContextBudget(MaxTotalTokens: 100, ReservedOutputTokens: 120));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ContextBudget(MaxTotalTokens: 100, ReservedOutputTokens: 20, MaxContextTokens: -5));
+    }
+
+    [Fact]
     public async Task MmrReranker_PromotesDiversityOverRedundancy()
     {
         var metadata = new DocumentMetadata("doc", "", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
@@ -442,148 +888,244 @@ public sealed class RagPipelineTests
         // Due to diversity penalty, chunkB must be preferred over duplicate chunkA2
         Assert.Equal("doc#3", reranked[1].Chunk.ChunkId);
     }
+}
 
-    private sealed class RecordingReranker : IReranker
+internal sealed class RecordingReranker : IReranker
+{
+    public int ReceivedCandidateCount => ReceivedCandidates.Count;
+    public IReadOnlyList<RetrievalResult> ReceivedCandidates { get; private set; } = [];
+
+    public Task<IReadOnlyList<RetrievalResult>> RerankAsync(
+        string query,
+        IReadOnlyList<RetrievalResult> candidates,
+        int topK,
+        CancellationToken cancellationToken = default)
     {
-        public int ReceivedCandidateCount => ReceivedCandidates.Count;
-        public IReadOnlyList<RetrievalResult> ReceivedCandidates { get; private set; } = [];
+        ReceivedCandidates = candidates;
+        return Task.FromResult<IReadOnlyList<RetrievalResult>>(candidates.Take(topK).ToList());
+    }
+}
 
-        public Task<IReadOnlyList<RetrievalResult>> RerankAsync(
-            string query,
-            IReadOnlyList<RetrievalResult> candidates,
-            int topK,
-            CancellationToken cancellationToken = default)
+internal sealed class UnsupportedFilterRetriever : IRetriever
+{
+    public string Strategy => "unsupported";
+
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(string query, int topK, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult<IReadOnlyList<RetrievalResult>>([]);
+    }
+}
+
+internal sealed class FakeEmbeddingService : IEmbeddingService
+{
+    public string EmbeddingModel => "test-model";
+    public int Dimensions => 2;
+
+    public Task<EmbeddedChunk> EmbedAsync(DocumentChunk chunk, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new EmbeddedChunk(chunk, GetVector(chunk.Text), EmbeddingModel));
+    }
+
+    public async IAsyncEnumerable<EmbeddedChunk> EmbedAsync(
+        IAsyncEnumerable<DocumentChunk> chunks,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await foreach (var chunk in chunks.WithCancellation(cancellationToken))
         {
-            ReceivedCandidates = candidates;
-            return Task.FromResult<IReadOnlyList<RetrievalResult>>(candidates.Take(topK).ToList());
+            yield return await EmbedAsync(chunk, cancellationToken);
         }
     }
 
-    private sealed class UnsupportedFilterRetriever : IRetriever
+    public Task<ReadOnlyMemory<float>> EmbedQueryAsync(string query, CancellationToken cancellationToken = default)
     {
-        public string Strategy => "unsupported";
-
-        public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(string query, int topK, CancellationToken cancellationToken = default)
-        {
-            return Task.FromResult<IReadOnlyList<RetrievalResult>>([]);
-        }
+        return Task.FromResult(GetVector(query));
     }
 
-    private sealed class FakeEmbeddingService : IEmbeddingService
+    private static ReadOnlyMemory<float> GetVector(string text)
     {
-        public string EmbeddingModel => "test-model";
-        public int Dimensions => 2;
-
-        public Task<EmbeddedChunk> EmbedAsync(DocumentChunk chunk, CancellationToken cancellationToken = default)
+        // Simple deterministic vector: alpha points in [1, 0], beta points in [0, 1]
+        if (text.Contains("alpha", StringComparison.OrdinalIgnoreCase))
         {
-            return Task.FromResult(new EmbeddedChunk(chunk, GetVector(chunk.Text), EmbeddingModel));
+            return new float[] { 1f, 0f };
         }
-
-        public async IAsyncEnumerable<EmbeddedChunk> EmbedAsync(
-            IAsyncEnumerable<DocumentChunk> chunks,
-            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        if (text.Contains("beta", StringComparison.OrdinalIgnoreCase))
         {
-            await foreach (var chunk in chunks.WithCancellation(cancellationToken))
-            {
-                yield return await EmbedAsync(chunk, cancellationToken);
-            }
+            return new float[] { 0f, 1f };
         }
+        return new float[] { 0.707f, 0.707f };
+    }
+}
 
-        public Task<ReadOnlyMemory<float>> EmbedQueryAsync(string query, CancellationToken cancellationToken = default)
-        {
-            return Task.FromResult(GetVector(query));
-        }
+internal sealed class FakeRetriever : IRetriever
+{
+    private readonly IReadOnlyList<RetrievalResult> _results;
+    private readonly Exception? _exceptionToThrow;
 
-        private static ReadOnlyMemory<float> GetVector(string text)
-        {
-            // Simple deterministic vector: alpha points in [1, 0], beta points in [0, 1]
-            if (text.Contains("alpha", StringComparison.OrdinalIgnoreCase))
-            {
-                return new float[] { 1f, 0f };
-            }
-            if (text.Contains("beta", StringComparison.OrdinalIgnoreCase))
-            {
-                return new float[] { 0f, 1f };
-            }
-            return new float[] { 0.707f, 0.707f };
-        }
+    public FakeRetriever(IReadOnlyList<RetrievalResult>? results = null, Exception? exceptionToThrow = null)
+    {
+        _results = results ?? [];
+        _exceptionToThrow = exceptionToThrow;
     }
 
-    private sealed class FakeRetriever : IRetriever
+    public string Strategy => "fake";
+
+    public RetrievalRequest? LastRequest { get; private set; }
+
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(string query, int topK, CancellationToken cancellationToken = default)
     {
-        private readonly IReadOnlyList<RetrievalResult> _results;
+        return RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+    }
 
-        public FakeRetriever(IReadOnlyList<RetrievalResult>? results = null)
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(RetrievalRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_exceptionToThrow != null)
         {
-            _results = results ?? [];
+            throw _exceptionToThrow;
         }
 
-        public string Strategy => "fake";
+        LastRequest = request;
+        var matches = request.Filter is not null
+            ? _results.Where(r => request.Filter.Matches(r.Chunk.Metadata))
+            : _results;
+        return Task.FromResult<IReadOnlyList<RetrievalResult>>(matches.Take(request.TopK).ToList());
+    }
+}
 
-        public RetrievalRequest? LastRequest { get; private set; }
+internal sealed class FakeChatGenerator : IChatGenerator
+{
+    private readonly string _reply;
+    private readonly Exception? _exceptionToThrow;
 
-        public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(string query, int topK, CancellationToken cancellationToken = default)
+    public FakeChatGenerator(string reply, Exception? exceptionToThrow = null)
+    {
+        _reply = reply;
+        _exceptionToThrow = exceptionToThrow;
+    }
+
+    public Task<string> GenerateAsync(string prompt, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_exceptionToThrow != null)
         {
-            return RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+            throw _exceptionToThrow;
         }
+        return Task.FromResult(_reply);
+    }
+}
 
-        public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(RetrievalRequest request, CancellationToken cancellationToken = default)
+internal sealed class FakeStreamingChatGenerator : IChatGenerator
+{
+    private readonly List<string> _chunks;
+    private readonly Exception? _exceptionToThrow;
+    private readonly int _throwAfterChunkIndex;
+
+    public FakeStreamingChatGenerator(
+        IEnumerable<string> chunks,
+        Exception? exceptionToThrow = null,
+        int throwAfterChunkIndex = -1)
+    {
+        _chunks = chunks.ToList();
+        _exceptionToThrow = exceptionToThrow;
+        _throwAfterChunkIndex = throwAfterChunkIndex;
+    }
+
+    public Task<string> GenerateAsync(string prompt, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_exceptionToThrow != null && _throwAfterChunkIndex < 0)
+        {
+            throw _exceptionToThrow;
+        }
+        return Task.FromResult(string.Concat(_chunks));
+    }
+
+    public async IAsyncEnumerable<string> GenerateStreamingAsync(
+        string prompt,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        for (var i = 0; i < _chunks.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            LastRequest = request;
-            var matches = request.Filter is not null
-                ? _results.Where(r => request.Filter.Matches(r.Chunk.Metadata))
-                : _results;
-            return Task.FromResult<IReadOnlyList<RetrievalResult>>(matches.Take(request.TopK).ToList());
+            yield return _chunks[i];
+            if (_exceptionToThrow != null && i == _throwAfterChunkIndex)
+            {
+                throw _exceptionToThrow;
+            }
+        }
+        if (_exceptionToThrow != null && _throwAfterChunkIndex < 0)
+        {
+            throw _exceptionToThrow;
         }
     }
+}
 
-    private sealed class FakeChatGenerator : IChatGenerator
+internal sealed class TestChatClient : IChatClient
+{
+    private readonly string _reply;
+    private readonly List<string>? _streamingChunks;
+
+    public TestChatClient(string reply, IEnumerable<string>? streamingChunks = null)
     {
-        private readonly string _reply;
-
-        public FakeChatGenerator(string reply)
-        {
-            _reply = reply;
-        }
-
-        public Task<string> GenerateAsync(string prompt, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(_reply);
-        }
+        _reply = reply;
+        _streamingChunks = streamingChunks?.ToList();
     }
 
-    private sealed class TestChatClient : IChatClient
+    public ChatClientMetadata Metadata { get; } = new("test");
+
+    public Task<ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null,
+        CancellationToken cancellationToken = default)
     {
-        private readonly string _reply;
-
-        public TestChatClient(string reply)
-        {
-            _reply = reply;
-        }
-
-        public ChatClientMetadata Metadata { get; } = new("test");
-
-        public Task<ChatResponse> GetResponseAsync(
-            IEnumerable<ChatMessage> messages,
-            ChatOptions? options = null,
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _reply)));
-        }
-
-        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
-            IEnumerable<ChatMessage> messages,
-            ChatOptions? options = null,
-            CancellationToken cancellationToken = default)
-        {
-            throw new NotImplementedException();
-        }
-
-        public object? GetService(Type serviceType, object? serviceKey = null) => null;
-
-        public void Dispose() { }
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _reply)));
     }
+
+    public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_streamingChunks != null)
+        {
+            foreach (var chunk in _streamingChunks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return new ChatResponseUpdate(ChatRole.Assistant, chunk);
+            }
+        }
+        else
+        {
+            yield return new ChatResponseUpdate(ChatRole.Assistant, _reply);
+        }
+    }
+
+    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+    public void Dispose() { }
+}
+
+internal sealed class ExactTokenCounter : ITokenCounter
+{
+    private readonly Func<string, int>? _customCounter;
+
+    public ExactTokenCounter() { }
+
+    public ExactTokenCounter(Func<string, int> customCounter)
+    {
+        _customCounter = customCounter;
+    }
+
+    public string EncodingName => "exact-test";
+
+    public int CountTokens(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        return _customCounter != null ? _customCounter(text) : text.Length;
+    }
+
+    public int CountTokens(ReadOnlySpan<char> text) => CountTokens(text.ToString());
 }

@@ -5,13 +5,35 @@ namespace Pigmentor.Generation;
 /// </summary>
 public sealed record RagPipelineSettings
 {
-    /// <summary>Default candidate pool size to retrieve. Default is 5.</summary>
-    public int DefaultTopK { get; init; } = 5;
+    private int _defaultTopK = 5;
+    private ContextBudget _budget = new(MaxTotalTokens: 2048, ReservedOutputTokens: 512);
+    private ContextBuilderOptions _contextOptions = new();
+
+    /// <summary>Default candidate pool size to retrieve. Must be positive. Default is 5.</summary>
+    public int DefaultTopK
+    {
+        get => _defaultTopK;
+        set
+        {
+            if (value <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "DefaultTopK must be positive.");
+            }
+            _defaultTopK = value;
+        }
+    }
 
     /// <summary>Token budget for context building. Default is 2048 total with 512 reserved output.</summary>
-    public ContextBudget Budget { get; init; } = new(MaxTotalTokens: 2048, ReservedOutputTokens: 512);
+    public ContextBudget Budget
+    {
+        get => _budget;
+        set => _budget = value;
+    }
 
     /// <summary>Options for assembling and formatting context.</summary>
-    public ContextBuilderOptions ContextOptions { get; init; } = new();
+    public ContextBuilderOptions ContextOptions
+    {
+        get => _contextOptions;
+        set => _contextOptions = value ?? throw new ArgumentNullException(nameof(value));
+    }
 }
-

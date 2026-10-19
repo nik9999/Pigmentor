@@ -1,6 +1,10 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
 using Pigmentor.Core.Tokens;
@@ -9,11 +13,23 @@ using Pigmentor.Retrieval;
 namespace Pigmentor.Generation;
 
 /// <summary>
-/// Abstraction for text generation from a formatted prompt.
+/// Abstraction for text generation from a formatted prompt with optional streaming support.
 /// </summary>
 public interface IChatGenerator
 {
+    /// <summary>
+    /// Generates a complete text response for the given prompt.
+    /// </summary>
     Task<string> GenerateAsync(string prompt, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Generates a streaming text response, yielding incremental chunks as they arrive.
+    /// Default implementation throws <see cref="NotSupportedException"/>.
+    /// </summary>
+    IAsyncEnumerable<string> GenerateStreamingAsync(string prompt, CancellationToken cancellationToken = default)
+    {
+        throw new NotSupportedException($"Streaming generation is not supported by {GetType().Name}.");
+    }
 }
 
 /// <summary>
@@ -22,7 +38,7 @@ public interface IChatGenerator
 /// </summary>
 public sealed class RagPipeline : IRagPipeline
 {
-    private static readonly Regex CitationRegex = new(@"\[(S\d+)\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex CitationRegex = new(@"\[(s\d+)\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private readonly IRetriever _retriever;
     private readonly IChatGenerator _chat;
@@ -31,11 +47,30 @@ public sealed class RagPipeline : IRagPipeline
     private readonly ITokenCounter _tokenCounter;
     private readonly RagPipelineSettings _settings;
 
+    /// <summary>
+    /// The runtime settings configuring this RAG pipeline instance.
+    /// </summary>
+    public RagPipelineSettings Settings => _settings;
+
+    public RagPipeline(
+        IRetriever retriever,
+        IChatClient chatClient)
+        : this(retriever, chatClient, reranker: null, contextBuilder: null, tokenCounter: null, settings: null)
+    {
+    }
+
+    public RagPipeline(
+        IRetriever retriever,
+        IChatGenerator chat)
+        : this(retriever, chat, reranker: null, contextBuilder: null, tokenCounter: null, settings: null)
+    {
+    }
+
     public RagPipeline(
         IRetriever retriever,
         IChatClient chatClient,
         ITokenCounter tokenCounter)
-        : this(retriever, chatClient, null, null, tokenCounter)
+        : this(retriever, chatClient, reranker: null, contextBuilder: null, tokenCounter: tokenCounter, settings: null)
     {
     }
 
@@ -43,7 +78,7 @@ public sealed class RagPipeline : IRagPipeline
         IRetriever retriever,
         IChatGenerator chat,
         ITokenCounter tokenCounter)
-        : this(retriever, chat, null, null, tokenCounter)
+        : this(retriever, chat, reranker: null, contextBuilder: null, tokenCounter: tokenCounter, settings: null)
     {
     }
 
@@ -55,6 +90,29 @@ public sealed class RagPipeline : IRagPipeline
         ITokenCounter? tokenCounter = null,
         RagPipelineSettings? settings = null)
         : this(retriever, new ChatClientGenerator(chatClient), reranker, contextBuilder, tokenCounter, settings)
+    {
+    }
+
+    public RagPipeline(
+        IRetriever retriever,
+        IChatClient chatClient,
+        IOptions<RagPipelineSettings> settingsOptions,
+        IReranker? reranker = null,
+        IContextBuilder? contextBuilder = null,
+        ITokenCounter? tokenCounter = null)
+        : this(retriever, new ChatClientGenerator(chatClient), reranker, contextBuilder, tokenCounter, settingsOptions?.Value)
+    {
+    }
+
+    [ActivatorUtilitiesConstructor]
+    public RagPipeline(
+        IRetriever retriever,
+        IChatGenerator chat,
+        IOptions<RagPipelineSettings> settingsOptions,
+        IReranker? reranker = null,
+        IContextBuilder? contextBuilder = null,
+        ITokenCounter? tokenCounter = null)
+        : this(retriever, chat, reranker, contextBuilder, tokenCounter, settingsOptions?.Value)
     {
     }
 
@@ -79,15 +137,84 @@ public sealed class RagPipeline : IRagPipeline
         RagRequest request,
         CancellationToken cancellationToken = default)
     {
+        var prep = await PrepareExecutionAsync(request, cancellationToken).ConfigureAwait(false);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var genSw = Stopwatch.StartNew();
+        var rawAnswer = await _chat.GenerateAsync(prep.Prompt, cancellationToken).ConfigureAwait(false);
+        genSw.Stop();
+        prep.Stopwatch.Stop();
+
+        return FinalizeResponse(rawAnswer, prep, genSw.Elapsed);
+    }
+
+    /// <inheritdoc />
+    public Task<RagResponse> AskAsync(
+        string question,
+        int? topK = null,
+        CancellationToken cancellationToken = default)
+    {
+        return AskAsync(new RagRequest(question, topK: topK), cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async IAsyncEnumerable<RagStreamEvent> AskStreamingAsync(
+        RagRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var prep = await PrepareExecutionAsync(request, cancellationToken).ConfigureAwait(false);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var genSw = Stopwatch.StartNew();
+        var stream = _chat.GenerateStreamingAsync(prep.Prompt, cancellationToken);
+        var answerBuilder = new StringBuilder();
+
+        await foreach (var delta in stream.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            if (!string.IsNullOrEmpty(delta))
+            {
+                answerBuilder.Append(delta);
+                yield return new RagTextDelta(delta);
+            }
+        }
+
+        genSw.Stop();
+        prep.Stopwatch.Stop();
+
+        var response = FinalizeResponse(answerBuilder.ToString(), prep, genSw.Elapsed);
+        yield return new RagCompleted(response);
+    }
+
+    /// <inheritdoc />
+    public IAsyncEnumerable<RagStreamEvent> AskStreamingAsync(
+        string question,
+        int? topK = null,
+        CancellationToken cancellationToken = default)
+    {
+        return AskStreamingAsync(new RagRequest(question, topK: topK), cancellationToken);
+    }
+
+    private async Task<PreparedExecution> PrepareExecutionAsync(
+        RagRequest request,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.Question);
 
-        var stopwatch = Stopwatch.StartNew();
         var topK = request.TopK ?? _settings.DefaultTopK;
+        if (topK <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), topK, "Effective TopK must be positive.");
+        }
 
-        // 1. Candidate retrieval (passing request with MetadataFilter into retrieval layer)
+        var stopwatch = Stopwatch.StartNew();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // 1. Candidate retrieval
+        var retrievalSw = Stopwatch.StartNew();
         var retrievalRequest = new RetrievalRequest(request.Question, topK, request.MetadataFilter);
         var candidatePool = await _retriever.RetrieveAsync(retrievalRequest, cancellationToken).ConfigureAwait(false);
+        retrievalSw.Stop();
         cancellationToken.ThrowIfCancellationRequested();
 
         // 2. Defensive post-filtering (guarantees adherence even if retrieval backend had loose semantics)
@@ -103,83 +230,112 @@ public sealed class RagPipeline : IRagPipeline
             cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
 
-        // 4. Context builder enforces token budget, accounting for prompt instructions and question overhead
-        var promptOverheadTokens = _tokenCounter.CountTokens(BuildPrompt(request.Question, RagContext.Empty));
+        // 4. Context builder enforces token budget, accounting for prompt instructions, delimiters, and question overhead (§3, §4, §5)
+        var basePrompt = RagPromptBuilder.BuildPrompt(request.Question, RagContext.Empty);
+        var promptOverheadTokens = _tokenCounter.CountTokens(basePrompt);
         var contextAllowance = _settings.Budget.ComputeAvailableContextTokens(promptOverheadTokens);
         var ragContext = _contextBuilder.BuildContext(rerankedCandidates, contextAllowance);
 
-        // 5. Prompt assembly requiring explicit [S1], [S2] references
-        var prompt = BuildPrompt(request.Question, ragContext);
+        // 5. Prompt assembly requiring explicit [S1], [S2] references and data boundary defense (§8, §9, §36, §37)
+        var prompt = RagPromptBuilder.BuildPrompt(request.Question, ragContext);
 
-        // 6. Answer generation
-        var answer = await _chat.GenerateAsync(prompt, cancellationToken).ConfigureAwait(false);
-        stopwatch.Stop();
+        // 6. Real prompt token counting for diagnostics (§16)
+        var promptTokenCount = _tokenCounter.CountTokens(prompt);
 
-        // 7. Deterministic citation parsing and validation against context sources
-        var citations = ParseAndMapCitations(answer, ragContext.SourceMap);
-
-        // 8. Diagnostics with real metrics
-        var diagnostics = new RagDiagnostics(
-            TotalLatency: stopwatch.Elapsed,
-            RetrievedCandidateCount: candidatePool.Count,
-            ContextSourceCount: ragContext.Sources.Count,
-            ContextTokenCount: ragContext.Sources.Count > 0 ? ragContext.TokenCount : null);
-
-        // 9. Response where sources correspond strictly to the context
-        return new RagResponse(answer, citations, ragContext.Sources, diagnostics);
+        return new PreparedExecution(
+            CandidatePool: candidatePool,
+            FilteredCandidates: filteredCandidates,
+            RerankedCandidates: rerankedCandidates,
+            RagContext: ragContext,
+            Prompt: prompt,
+            PromptTokenCount: promptTokenCount,
+            Stopwatch: stopwatch,
+            RetrievalLatency: retrievalSw.Elapsed);
     }
 
-    /// <summary>
-    /// Convenience overload querying with raw question string and optional top-k limit.
-    /// </summary>
-    public Task<RagResponse> AskAsync(
-        string question,
-        int? topK = null,
-        CancellationToken cancellationToken = default)
+    private static RagResponse FinalizeResponse(
+        string? rawAnswer,
+        PreparedExecution prep,
+        TimeSpan generationLatency)
     {
-        return AskAsync(new RagRequest(question, topK: topK), cancellationToken);
-    }
+        string answer;
+        IReadOnlyList<Citation> citations;
+        int validCount;
+        int invalidCount;
 
-    private static string BuildPrompt(string question, RagContext context)
-    {
-        if (context.Sources.Count == 0)
+        if (string.IsNullOrWhiteSpace(rawAnswer))
         {
-            return $"Answer the question using only the context below. If the answer cannot be found in the context, state that you do not have enough information.\n\nContext:\n(No relevant sources found.)\n\nQuestion: {question}";
+            answer = string.Empty;
+            citations = [];
+            validCount = 0;
+            invalidCount = 0;
+        }
+        else
+        {
+            answer = rawAnswer;
+            (citations, validCount, invalidCount) = ParseAndMapCitations(answer, prep.RagContext.SourceMap);
         }
 
-        return $"Answer the question using only the context sources below.\n" +
-               $"For each factual claim, cite the corresponding source tag in brackets (e.g. [S1] or [S2]).\n" +
-               $"Do not cite sources that are not in the context.\n" +
-               $"If the answer cannot be found in the context, state that you do not have enough information.\n\n" +
-               $"Context:\n{context.FormattedContext}\n\n" +
-               $"Question: {question}";
+        var diagnostics = new RagDiagnostics(
+            TotalLatency: prep.Stopwatch.Elapsed,
+            RetrievedCandidateCount: prep.CandidatePool.Count,
+            ContextSourceCount: prep.RagContext.Sources.Count,
+            ContextTokenCount: prep.RagContext.Sources.Count > 0 ? prep.RagContext.TokenCount : null,
+            FilteredCandidateCount: prep.FilteredCandidates.Count,
+            RerankedCandidateCount: prep.RerankedCandidates.Count,
+            PromptTokenCount: prep.PromptTokenCount,
+            ValidCitationCount: validCount,
+            InvalidCitationCount: invalidCount,
+            RetrievalLatency: prep.RetrievalLatency,
+            GenerationLatency: generationLatency);
+
+        return new RagResponse(answer, citations, prep.RagContext.Sources, diagnostics);
     }
 
-    private static List<Citation> ParseAndMapCitations(
+    private static (List<Citation> Citations, int ValidCount, int InvalidCount) ParseAndMapCitations(
         string answer,
         IReadOnlyDictionary<string, RetrievalResult> sourceMap)
     {
-        if (string.IsNullOrWhiteSpace(answer) || sourceMap.Count == 0)
+        if (string.IsNullOrWhiteSpace(answer))
         {
-            return [];
+            return ([], 0, 0);
         }
 
         var matches = CitationRegex.Matches(answer);
-        var citedTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var citations = new List<Citation>();
+        var invalidCount = 0;
 
         foreach (Match match in matches)
         {
             var tag = match.Groups[1].Value.ToUpperInvariant();
-            if (citedTags.Add(tag) && sourceMap.TryGetValue(tag, out var sourceResult))
+
+            if (sourceMap.TryGetValue(tag, out var sourceResult))
             {
-                var sourceIndex = int.TryParse(tag[1..], out var idx) ? idx : citations.Count + 1;
-                citations.Add(Citation.FromRetrievalResult(sourceIndex, sourceResult, tag));
+                if (seenTags.Add(tag))
+                {
+                    var sourceIndex = int.TryParse(tag[1..], out var idx) ? idx : citations.Count + 1;
+                    citations.Add(Citation.FromRetrievalResult(sourceIndex, sourceResult, tag));
+                }
+            }
+            else if (seenTags.Add(tag))
+            {
+                invalidCount++;
             }
         }
 
-        return citations;
+        return (citations, citations.Count, invalidCount);
     }
+
+    private sealed record PreparedExecution(
+        IReadOnlyList<RetrievalResult> CandidatePool,
+        IReadOnlyList<RetrievalResult> FilteredCandidates,
+        IReadOnlyList<RetrievalResult> RerankedCandidates,
+        RagContext RagContext,
+        string Prompt,
+        int PromptTokenCount,
+        Stopwatch Stopwatch,
+        TimeSpan RetrievalLatency);
 
     private sealed class ChatClientGenerator : IChatGenerator
     {
@@ -194,6 +350,20 @@ public sealed class RagPipeline : IRagPipeline
         {
             var response = await _client.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
             return response.Text ?? string.Empty;
+        }
+
+        public async IAsyncEnumerable<string> GenerateStreamingAsync(
+            string prompt,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            var stream = _client.GetStreamingResponseAsync(prompt, cancellationToken: cancellationToken);
+            await foreach (var update in stream.WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                if (!string.IsNullOrEmpty(update.Text))
+                {
+                    yield return update.Text;
+                }
+            }
         }
     }
 }

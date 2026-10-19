@@ -5,11 +5,17 @@ namespace Pigmentor.Generation;
 /// </summary>
 public enum OversizedChunkBehavior
 {
-    /// <summary>Truncate the chunk text so that it fits within the remaining token budget.</summary>
-    Truncate,
+    /// <summary>
+    /// Drop/skip the chunk entirely if it exceeds the remaining token budget.
+    /// Canonical policy for v1: avoids partial textual truncation
+    /// so citation provenance corresponds faithfully to the retrieved source content.
+    /// </summary>
+    Drop,
 
-    /// <summary>Drop/skip the chunk entirely if it exceeds the remaining token budget.</summary>
-    Drop
+    /// <summary>
+    /// Truncate the chunk text so that it fits within the remaining token budget.
+    /// </summary>
+    Truncate
 }
 
 /// <summary>
@@ -23,7 +29,8 @@ public sealed record ContextBuilderOptions
     /// <summary>Whether to apply lost-in-the-middle interleaving via <see cref="Pigmentor.Retrieval.ContextOrdering"/>.</summary>
     public bool EnableInterleaving { get; init; } = true;
 
-    /// <summary>Strategy for handling chunks that exceed the token budget.</summary>
-    public OversizedChunkBehavior OversizedBehavior { get; init; } = OversizedChunkBehavior.Truncate;
+    /// <summary>
+    /// Strategy for handling chunks that exceed the token budget. Defaults to <see cref="OversizedChunkBehavior.Drop"/>.
+    /// </summary>
+    public OversizedChunkBehavior OversizedBehavior { get; init; } = OversizedChunkBehavior.Drop;
 }
-

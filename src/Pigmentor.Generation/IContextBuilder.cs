@@ -19,6 +19,8 @@ public interface IContextBuilder
     /// </summary>
     RagContext BuildContext(
         IReadOnlyList<RetrievalResult> candidates,
-        int maxTokens) => BuildContext(candidates, new ContextBudget(maxTokens, 0));
+        int maxTokens) => maxTokens <= 0 || candidates.Count == 0
+            ? RagContext.Empty
+            : BuildContext(candidates, new ContextBudget(maxTokens, 0));
 }
 

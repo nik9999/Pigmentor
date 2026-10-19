@@ -216,4 +216,40 @@ public sealed class HostingTests
         Assert.NotNull(provider.GetService<ITokenCounter>());
 #pragma warning restore CS0618
     }
+
+    [Fact]
+    public async Task AddPigmentor_ConfigureRagPipeline_SettingsAffectRuntime()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Title", 0, "", DateOnly.MinValue, "Doc");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Chunk text", 0, 10, meta);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+        var chatGenerator = new FakeChatGenerator("Configured response [S1]");
+
+        var services = new ServiceCollection();
+        services.AddPigmentor()
+            .ConfigureRagPipeline(settings =>
+            {
+                settings.DefaultTopK = 7;
+                settings.Budget = new ContextBudget(MaxTotalTokens: 800, ReservedOutputTokens: 150);
+            });
+
+        // Register retriever and chat generator
+        services.AddSingleton<IRetriever>(retriever);
+        services.AddSingleton<IChatGenerator>(chatGenerator);
+
+        using var provider = services.BuildServiceProvider();
+        var pipeline = provider.GetRequiredService<IRagPipeline>();
+
+        Assert.IsType<RagPipeline>(pipeline);
+        var concretePipeline = (RagPipeline)pipeline;
+        Assert.Equal(7, concretePipeline.Settings.DefaultTopK);
+        Assert.Equal(800, concretePipeline.Settings.Budget.MaxTotalTokens);
+        Assert.Equal(150, concretePipeline.Settings.Budget.ReservedOutputTokens);
+
+        // Calling AskAsync with default topK should pass 7 to retriever
+        var response = await pipeline.AskAsync("Test question");
+        Assert.Equal("Configured response [S1]", response.Answer);
+        Assert.NotNull(retriever.LastRequest);
+        Assert.Equal(7, retriever.LastRequest.TopK);
+    }
 }

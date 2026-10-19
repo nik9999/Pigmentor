@@ -1,8 +1,11 @@
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.DependencyInjection;
+using Pigmentor.Core.Tokens;
 using Pigmentor.Generation;
 using Pigmentor.Retrieval;
 
@@ -27,10 +30,29 @@ public static class PigmentorHostingExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         services.AddPigmentorCore(configuration);
+
+        if (configuration != null)
+        {
+            services.Configure<RagPipelineSettings>(configuration.GetSection("Pigmentor:Rag"));
+        }
+
         services.TryAddSingleton<IReranker, NoOpReranker>();
         services.TryAddTransient<IContextBuilder, ContextBuilder>();
-        services.TryAddTransient<IRagPipeline, RagPipeline>();
-        services.TryAddTransient<RagPipeline>();
+        services.TryAddTransient<IRagPipeline>(sp =>
+        {
+            var retriever = sp.GetRequiredService<IRetriever>();
+            var chatGenerator = sp.GetService<IChatGenerator>();
+            var chatClient = chatGenerator == null ? sp.GetRequiredService<IChatClient>() : null;
+            var reranker = sp.GetService<IReranker>();
+            var contextBuilder = sp.GetService<IContextBuilder>();
+            var tokenCounter = sp.GetService<ITokenCounter>();
+            var settings = sp.GetService<IOptions<RagPipelineSettings>>()?.Value;
+
+            return chatGenerator != null
+                ? new RagPipeline(retriever, chatGenerator, reranker, contextBuilder, tokenCounter, settings)
+                : new RagPipeline(retriever, chatClient!, reranker, contextBuilder, tokenCounter, settings);
+        });
+        services.TryAddTransient<RagPipeline>(sp => (RagPipeline)sp.GetRequiredService<IRagPipeline>());
 
         return new PigmentorBuilder(services, configuration);
     }
