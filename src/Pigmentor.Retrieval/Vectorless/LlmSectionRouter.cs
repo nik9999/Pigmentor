@@ -36,23 +36,35 @@ public sealed class LlmSectionRouter : IRetriever
     public string Strategy => "llm-section";
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Filter is not null)
+        {
+            throw new NotSupportedException($"Retriever '{Strategy}' does not support metadata filtering.");
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
         var nodes = _index.AllNodes().ToList();
         var titles = string.Join("\n", nodes.Select((n, i) => $"{i}: {n.Path}"));
 
         var prompt =
             $"You are routing a question to the most relevant section(s) of a structured document. " +
-            $"Reply with a comma-separated list of up to {topK} integer indices, in order of relevance. " +
+            $"Reply with a comma-separated list of up to {request.TopK} integer indices, in order of relevance. " +
             $"No prose.\n\n" +
             $"Sections:\n{titles}\n\n" +
-            $"Question: {query}";
+            $"Question: {request.Query}";
 
         var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         var raw = response.Text ?? string.Empty;
@@ -61,7 +73,7 @@ public sealed class LlmSectionRouter : IRetriever
             .Select(t => int.TryParse(t, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : -1)
             .Where(n => n >= 0 && n < nodes.Count)
             .Distinct()
-            .Take(topK)
+            .Take(request.TopK)
             .ToList();
 
         var meta = new DocumentMetadata("structural", "structural", "Structural", "All",

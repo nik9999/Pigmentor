@@ -26,23 +26,30 @@ public sealed class HybridRetriever : IRetriever
 
     public string Strategy => $"hybrid({_dense.Strategy}+{_sparse.Strategy})";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
         // Fan out 2× topK candidates per leg; the merger picks the final topK.
-        var candidateK = Math.Max(topK * 2, topK + 5);
-        var denseTask = _dense.RetrieveAsync(query, candidateK, cancellationToken);
-        var sparseTask = _sparse.RetrieveAsync(query, candidateK, cancellationToken);
+        var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
+        var legRequest = request with { TopK = candidateK };
+        var denseTask = _dense.RetrieveAsync(legRequest, cancellationToken);
+        var sparseTask = _sparse.RetrieveAsync(legRequest, cancellationToken);
 
         // WaitAsync ensures the await unblocks promptly on cancellation even if
         // one inner retriever has a bug that doesn't cooperate with the token.
         await Task.WhenAll(denseTask, sparseTask).WaitAsync(cancellationToken).ConfigureAwait(false);
 
-        return _merger.Merge(denseTask.Result, sparseTask.Result, topK);
+        return _merger.Merge(denseTask.Result, sparseTask.Result, request.TopK);
     }
 }

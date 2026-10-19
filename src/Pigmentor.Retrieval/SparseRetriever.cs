@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Pigmentor.Core.Filtering;
 
 namespace Pigmentor.Retrieval;
 
@@ -72,16 +73,28 @@ public sealed partial class SparseRetriever : IRetriever
     public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        var queryTokens = Tokenize(query);
+        var queryTokens = Tokenize(request.Query);
         var scored = new List<RetrievalResult>(_docs.Count);
         foreach (var (chunk, tf, len) in _docs)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (request.Filter is not null && !request.Filter.Matches(chunk.Metadata))
+            {
+                continue;
+            }
+
             double score = 0;
             foreach (var qt in queryTokens)
             {
@@ -99,7 +112,7 @@ public sealed partial class SparseRetriever : IRetriever
         }
 
         scored.Sort((a, b) => b.Score.CompareTo(a.Score));
-        return Task.FromResult<IReadOnlyList<RetrievalResult>>(scored.Take(topK).ToList());
+        return Task.FromResult<IReadOnlyList<RetrievalResult>>(scored.Take(request.TopK).ToList());
     }
 
     private static string[] Tokenize(string text)

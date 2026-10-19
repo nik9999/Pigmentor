@@ -89,24 +89,35 @@ public sealed class PostgresHybridRetriever : IRetriever, IAsyncDisposable
 
     public string Strategy => "hybrid-postgres";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Filter is not null)
+        {
+            throw new NotSupportedException($"Retriever '{Strategy}' does not support metadata filtering.");
+        }
 
-        var queryVec = await _embeddings.EmbedQueryAsync(query, cancellationToken).ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
+
+        var queryVec = await _embeddings.EmbedQueryAsync(request.Query, cancellationToken).ConfigureAwait(false);
 
         await using var command = _dataSource.CreateCommand(_sql);
         // Values are bound as parameters — never string-interpolated — so the
         // query text and the embedding cannot be used for SQL injection.
         command.Parameters.AddWithValue("embedding", FormatVectorLiteral(queryVec.Span));
-        command.Parameters.AddWithValue("query", query);
-        command.Parameters.AddWithValue("topk", topK);
+        command.Parameters.AddWithValue("query", request.Query);
+        command.Parameters.AddWithValue("topk", request.TopK);
 
-        var results = new List<RetrievalResult>(topK);
+        var results = new List<RetrievalResult>(request.TopK);
         await using var reader = await command
             .ExecuteReaderAsync(cancellationToken)
             .ConfigureAwait(false);

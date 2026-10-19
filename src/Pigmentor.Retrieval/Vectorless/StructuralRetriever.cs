@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Pigmentor.Core.Filtering;
 
 namespace Pigmentor.Retrieval.Vectorless;
 
@@ -162,23 +163,30 @@ public sealed class StructuralRetriever : IRetriever
     // --- IRetriever adapter: identifier extraction → lookup, else fallback --
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        var explicitId = await ExtractIdentifierAsync(query, cancellationToken).ConfigureAwait(false);
+        var explicitId = await ExtractIdentifierAsync(request.Query, cancellationToken).ConfigureAwait(false);
         if (explicitId is not null && WithCrossReferences(explicitId, depth: 1) is { Count: > 0 } nodes)
         {
-            return ToResults(nodes, topK, _index.Root.Title);
+            return ToResults(nodes, request.TopK, _index.Root.Title, request.Filter);
         }
 
         if (_topicFallback is not null)
         {
-            return await _topicFallback.RetrieveAsync(query, topK, cancellationToken).ConfigureAwait(false);
+            return await _topicFallback.RetrieveAsync(request, cancellationToken).ConfigureAwait(false);
         }
 
         return [];
@@ -218,19 +226,35 @@ public sealed class StructuralRetriever : IRetriever
         return null;
     }
 
-    private static IReadOnlyList<RetrievalResult> ToResults(
+    private static List<RetrievalResult> ToResults(
         IReadOnlyList<StructuralNode> nodes,
         int topK,
-        string documentTitle) =>
-        [.. nodes.Take(topK).Select((n, rank) =>
+        string documentTitle,
+        MetadataFilter? filter = null)
+    {
+        var results = new List<RetrievalResult>(nodes.Count);
+        int rank = 0;
+        foreach (var n in nodes)
         {
-            var text = $"{n.Path}\n\n{n.Text}";
-            // Carry the stable node id as the chunk id so the citation is deterministic.
             var meta = new DocumentMetadata(
                 n.Id, "structural", "Structural", "All",
                 "Internal", "Section", 2026, "structural",
                 new DateOnly(2026, 1, 1), documentTitle);
+
+            if (filter is not null && !filter.Matches(meta))
+            {
+                continue;
+            }
+
+            var text = $"{n.Path}\n\n{n.Text}";
             var chunk = new DocumentChunk(n.Id, "structural", rank, text, 0, text.Length, meta);
-            return new RetrievalResult(chunk, 1.0 / (rank + 1));
-        })];
+            results.Add(new RetrievalResult(chunk, 1.0 / (rank + 1)));
+            rank++;
+            if (results.Count >= topK)
+            {
+                break;
+            }
+        }
+        return results;
+    }
 }

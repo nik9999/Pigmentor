@@ -30,20 +30,26 @@ public sealed class CragRetriever : IRetriever
         _chat = chat;
     }
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        var candidates = await _inner.RetrieveAsync(query, topK * 2, cancellationToken).ConfigureAwait(false);
+        var candidates = await _inner.RetrieveAsync(request with { TopK = request.TopK * 2 }, cancellationToken).ConfigureAwait(false);
         var graded = new List<RetrievalResult>();
         foreach (var c in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var grade = await GradeAsync(query, c.Chunk.Text, cancellationToken).ConfigureAwait(false);
+            var grade = await GradeAsync(request.Query, c.Chunk.Text, cancellationToken).ConfigureAwait(false);
             if (grade != Grade.Incorrect)
             {
                 graded.Add(c);
@@ -52,9 +58,9 @@ public sealed class CragRetriever : IRetriever
 
         if (graded.Count == 0 && WebFallback is not null)
         {
-            return await WebFallback.RetrieveAsync(query, topK, cancellationToken).ConfigureAwait(false);
+            return await WebFallback.RetrieveAsync(request, cancellationToken).ConfigureAwait(false);
         }
-        return [.. graded.Take(topK)];
+        return [.. graded.Take(request.TopK)];
     }
 
     private enum Grade { Correct, Ambiguous, Incorrect }

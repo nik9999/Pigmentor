@@ -31,18 +31,24 @@ public sealed class HydeRetriever : IRetriever
 
     public string Strategy => $"hyde({_inner.Strategy})";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        var prompt = Prompt.Replace("{0}", query, StringComparison.Ordinal);
+        var prompt = Prompt.Replace("{0}", request.Query, StringComparison.Ordinal);
         var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         var hypothetical = (response.Text ?? string.Empty).Trim();
-        var searchText = string.IsNullOrEmpty(hypothetical) ? query : hypothetical;
-        return await _inner.RetrieveAsync(searchText, topK, cancellationToken).ConfigureAwait(false);
+        var searchText = string.IsNullOrEmpty(hypothetical) ? request.Query : hypothetical;
+        return await _inner.RetrieveAsync(request with { Query = searchText }, cancellationToken).ConfigureAwait(false);
     }
 }

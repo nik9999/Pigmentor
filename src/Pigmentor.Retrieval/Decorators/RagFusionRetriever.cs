@@ -34,26 +34,32 @@ public sealed class RagFusionRetriever : IRetriever
 
     public string Strategy => $"rag-fusion({_inner.Strategy})";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
         var prompt = Prompt.Replace("{0}", QueryVariants.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal)
-                           .Replace("{1}", query, StringComparison.Ordinal);
+                           .Replace("{1}", request.Query, StringComparison.Ordinal);
         var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         var variants = (response.Text ?? string.Empty)
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Take(QueryVariants)
             .ToList();
         // Always include the original query.
-        variants.Insert(0, query);
+        variants.Insert(0, request.Query);
 
-        var candidateK = Math.Max(topK * 2, topK + 5);
-        var lists = await Task.WhenAll(variants.Select(v => _inner.RetrieveAsync(v, candidateK, cancellationToken))).ConfigureAwait(false);
+        var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
+        var lists = await Task.WhenAll(variants.Select(v => _inner.RetrieveAsync(request with { Query = v, TopK = candidateK }, cancellationToken))).ConfigureAwait(false);
 
         if (lists.Length == 0)
         {
@@ -62,8 +68,8 @@ public sealed class RagFusionRetriever : IRetriever
         var merged = lists[0];
         for (int i = 1; i < lists.Length; i++)
         {
-            merged = _merger.Merge(merged, lists[i], topK * 2);
+            merged = _merger.Merge(merged, lists[i], request.TopK * 2);
         }
-        return [.. merged.Take(topK)];
+        return [.. merged.Take(request.TopK)];
     }
 }

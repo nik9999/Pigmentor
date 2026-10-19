@@ -27,15 +27,26 @@ public sealed class GraphRetriever : IRetriever
 
     public string Strategy => "graph";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Filter is not null)
+        {
+            throw new NotSupportedException($"Retriever '{Strategy}' does not support metadata filtering.");
+        }
 
-        var extraction = await _extractor.ExtractAsync(query, cancellationToken).ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
+
+        var extraction = await _extractor.ExtractAsync(request.Query, cancellationToken).ConfigureAwait(false);
         var names = extraction.Entities.Select(e => e.Name).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (names.Count == 0)
         {
@@ -48,7 +59,7 @@ public sealed class GraphRetriever : IRetriever
             new DateOnly(2026, 1, 1), "Knowledge graph subgraph");
 
         return [.. entities
-            .Take(topK)
+            .Take(request.TopK)
             .Select((e, i) =>
             {
                 var text = $"{e.Type}: {e.Name}" +

@@ -37,31 +37,37 @@ public sealed class StepBackRetriever : IRetriever
 
     public string Strategy => $"stepback({_inner.Strategy})";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        var prompt = Prompt.Replace("{0}", query, StringComparison.Ordinal);
+        var prompt = Prompt.Replace("{0}", request.Query, StringComparison.Ordinal);
         var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         var stepBack = (response.Text ?? string.Empty).Trim();
 
         // Pull a deeper candidate pool per leg so the fusion has room to work.
-        var candidateK = Math.Max(topK * 2, topK + 5);
-        var original = await _inner.RetrieveAsync(query, candidateK, cancellationToken).ConfigureAwait(false);
+        var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
+        var original = await _inner.RetrieveAsync(request with { TopK = candidateK }, cancellationToken).ConfigureAwait(false);
 
         // If the model returned nothing usable, fall back to the original leg
         // alone rather than re-issuing the same query as a degenerate "step-back".
         if (string.IsNullOrEmpty(stepBack) ||
-            string.Equals(stepBack, query, StringComparison.OrdinalIgnoreCase))
+            string.Equals(stepBack, request.Query, StringComparison.OrdinalIgnoreCase))
         {
-            return [.. original.Take(topK)];
+            return [.. original.Take(request.TopK)];
         }
 
-        var broader = await _inner.RetrieveAsync(stepBack, candidateK, cancellationToken).ConfigureAwait(false);
-        return _merger.Merge(original, broader, topK);
+        var broader = await _inner.RetrieveAsync(request with { Query = stepBack, TopK = candidateK }, cancellationToken).ConfigureAwait(false);
+        return _merger.Merge(original, broader, request.TopK);
     }
 }

@@ -112,26 +112,37 @@ public sealed class AzureAiSearchHybridRetriever : IRetriever
 
     public string Strategy => "hybrid-azure";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Filter is not null)
+        {
+            throw new NotSupportedException($"Retriever '{Strategy}' does not support metadata filtering.");
+        }
 
-        var queryVec = await _embeddings.EmbedQueryAsync(query, cancellationToken).ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
+
+        var queryVec = await _embeddings.EmbedQueryAsync(request.Query, cancellationToken).ConfigureAwait(false);
 
         var options = new SearchOptions
         {
-            Size = topK,
+            Size = request.TopK,
             VectorSearch = new VectorSearchOptions
             {
                 Queries =
                 {
                     new VectorizedQuery(queryVec)
                     {
-                        KNearestNeighborsCount = topK,
+                        KNearestNeighborsCount = request.TopK,
                         Fields = { _vectorFieldName },
                     },
                 },
@@ -152,14 +163,14 @@ public sealed class AzureAiSearchHybridRetriever : IRetriever
         // searchText is the keyword (BM25) leg; the VectorizedQuery is the dense
         // leg. Azure AI Search fuses the two server-side with RRF.
         var response = await _searchClient
-            .SearchAsync<SearchDocumentRecord>(searchText: query, options, cancellationToken)
+            .SearchAsync<SearchDocumentRecord>(searchText: request.Query, options, cancellationToken)
             .ConfigureAwait(false);
 
-        var results = new List<RetrievalResult>(topK);
+        var results = new List<RetrievalResult>(request.TopK);
         await foreach (var hit in response.Value.GetResultsAsync().ConfigureAwait(false))
         {
             results.Add(new RetrievalResult(AzureAiSearchVectorStore.BuildChunk(hit.Document), hit.Score ?? 0d));
-            if (results.Count >= topK)
+            if (results.Count >= request.TopK)
             {
                 break;
             }

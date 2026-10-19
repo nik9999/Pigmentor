@@ -25,19 +25,26 @@ public sealed class HybridDatabaseRetriever : IRetriever
 
     public string Strategy => $"hybrid-db({_vector.Strategy}+{_graph.Strategy}, {_fusion.Strategy})";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        var candidateK = Math.Max(topK * 2, topK + 5);
-        var vectorTask = _vector.RetrieveAsync(query, candidateK, cancellationToken);
-        var graphTask = _graph.RetrieveAsync(query, candidateK, cancellationToken);
+        var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
+        var legRequest = request with { TopK = candidateK };
+        var vectorTask = _vector.RetrieveAsync(legRequest, cancellationToken);
+        var graphTask = _graph.RetrieveAsync(legRequest, cancellationToken);
         await Task.WhenAll(vectorTask, graphTask).ConfigureAwait(false);
 
-        return _fusion.Fuse(vectorTask.Result, graphTask.Result, topK);
+        return _fusion.Fuse(vectorTask.Result, graphTask.Result, request.TopK);
     }
 }

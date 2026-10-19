@@ -79,18 +79,29 @@ public sealed partial class QdrantHybridRetriever : IRetriever
     [GeneratedRegex(@"[\p{L}\d_]+", RegexOptions.CultureInvariant)]
     private static partial Regex TokenRegex();
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Filter is not null)
+        {
+            throw new NotSupportedException($"Retriever '{Strategy}' does not support metadata filtering.");
+        }
 
-        var denseVec = await _embeddings.EmbedQueryAsync(query, cancellationToken).ConfigureAwait(false);
-        var (sparseValues, sparseIndices) = BuildSparseQueryVector(query);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        var candidateLimit = (ulong)(topK * CandidateMultiplier);
+        var denseVec = await _embeddings.EmbedQueryAsync(request.Query, cancellationToken).ConfigureAwait(false);
+        var (sparseValues, sparseIndices) = BuildSparseQueryVector(request.Query);
+
+        var candidateLimit = (ulong)(request.TopK * CandidateMultiplier);
 
         // Dense prefetch leg: nearest neighbors over the named dense vector.
         var densePrefetch = new PrefetchQuery
@@ -115,7 +126,7 @@ public sealed partial class QdrantHybridRetriever : IRetriever
             collectionName: _collectionName,
             query: Fusion.Rrf, // Fusion -> Query (fuse the prefetch results)
             prefetch: [densePrefetch, sparsePrefetch],
-            limit: (ulong)topK,
+            limit: (ulong)request.TopK,
             payloadSelector: true,
             cancellationToken: cancellationToken).ConfigureAwait(false);
 

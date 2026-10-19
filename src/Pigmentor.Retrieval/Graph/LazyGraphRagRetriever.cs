@@ -56,15 +56,26 @@ public sealed class LazyGraphRagRetriever : IRetriever
 
     public string Strategy => "lazy-graph-rag";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Filter is not null)
+        {
+            throw new NotSupportedException($"Retriever '{Strategy}' does not support metadata filtering.");
+        }
 
-        var extraction = await _extractor.ExtractAsync(query, cancellationToken).ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
+
+        var extraction = await _extractor.ExtractAsync(request.Query, cancellationToken).ConfigureAwait(false);
         var names = extraction.Entities.Select(e => e.Name)
             .Where(n => !string.IsNullOrWhiteSpace(n))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -101,7 +112,7 @@ public sealed class LazyGraphRagRetriever : IRetriever
         var prompt =
             $"Given the following subgraph, summarize it as a single concise paragraph " +
             $"that would help answer the question. Reply with ONLY the summary.\n\n" +
-            $"Question: {query}\n\nSubgraph:\n{subgraphText}";
+            $"Question: {request.Query}\n\nSubgraph:\n{subgraphText}";
 
         var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         var summary = (response.Text ?? string.Empty).Trim();
