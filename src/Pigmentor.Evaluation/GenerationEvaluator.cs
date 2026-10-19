@@ -40,7 +40,7 @@ public sealed class GenerationEvaluator
         var sentences = SplitSentences(answer);
         if (sentences.Count == 0)
         {
-            return new FaithfulnessAssessment(query, answer, 0, 0, 0, 1.0);
+            return new FaithfulnessAssessment(query, answer, 0, 0, 0, 0.0);
         }
 
         var contextBlock = string.Join("\n",

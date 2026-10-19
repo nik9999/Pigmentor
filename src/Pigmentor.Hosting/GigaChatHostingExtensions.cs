@@ -23,7 +23,6 @@ public static class GigaChatHostingExtensions
         ArgumentNullException.ThrowIfNull(builder);
 
         builder.UseGigaChatChat(configure);
-        builder.UseGigaChatEmbeddings();
 
         return builder;
     }
@@ -34,22 +33,17 @@ public static class GigaChatHostingExtensions
     public static PigmentorBuilder UseGigaChat(
         this PigmentorBuilder builder,
         string authorizationKey,
-        string? chatModel = null,
-        string? embeddingModel = null)
+        string? chatModel = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(authorizationKey);
 
-        return builder.UseGigaChat(opts =>
+        return builder.UseGigaChatChat(opts =>
         {
             opts.AuthorizationKey = authorizationKey;
             if (!string.IsNullOrWhiteSpace(chatModel))
             {
                 opts.DefaultModel = chatModel;
-            }
-            if (!string.IsNullOrWhiteSpace(embeddingModel))
-            {
-                opts.DefaultEmbeddingModel = embeddingModel;
             }
         });
     }
@@ -147,4 +141,3 @@ public static class GigaChatHostingExtensions
         });
     }
 }
-

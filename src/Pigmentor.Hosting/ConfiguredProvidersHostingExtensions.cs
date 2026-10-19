@@ -24,6 +24,21 @@ public static class ConfiguredProvidersHostingExtensions
         ArgumentNullException.ThrowIfNull(builder);
 
         builder.Services.RemoveAll<IChatClient>();
+        builder.Services.AddSingleton<GigaChatClient>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<LlmClientOptions>>().Value;
+            if (string.IsNullOrWhiteSpace(options.AuthorizationKey))
+            {
+                throw new InvalidOperationException("Pigmentor:Llm:AuthorizationKey is required when Provider is GigaChat.");
+            }
+
+            return new GigaChatClient(new GigaChatClientOptions
+            {
+                AuthorizationKey = options.AuthorizationKey,
+                BaseUrl = new Uri(options.Endpoint),
+                DefaultModel = options.ChatModel
+            });
+        });
         builder.Services.AddSingleton<IChatClient>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<LlmClientOptions>>().Value;
@@ -42,7 +57,7 @@ public static class ConfiguredProvidersHostingExtensions
             {
                 LlmProvider.Ollama => new OllamaApiClient(endpointUri, options.ChatModel),
 
-                LlmProvider.GigaChat => BuildGigaChatClient(options, endpointUri),
+                LlmProvider.GigaChat => sp.GetRequiredService<GigaChatClient>().GetChatClient(options.ChatModel),
 
                 _ => throw new InvalidOperationException($"Unsupported LLM provider: {options.Provider}"),
             };
@@ -94,22 +109,4 @@ public static class ConfiguredProvidersHostingExtensions
         return builder;
     }
 
-    private static IChatClient BuildGigaChatClient(LlmClientOptions options, Uri endpointUri)
-    {
-        if (string.IsNullOrWhiteSpace(options.AuthorizationKey))
-        {
-            throw new InvalidOperationException("Pigmentor:Llm:AuthorizationKey is required when Provider is GigaChat.");
-        }
-
-        var clientOptions = new GigaChatClientOptions
-        {
-            AuthorizationKey = options.AuthorizationKey,
-            BaseUrl = endpointUri,
-            DefaultModel = options.ChatModel,
-            DefaultEmbeddingModel = "Embeddings"
-        };
-
-        return new GigaChatClient(clientOptions).GetChatClient(options.ChatModel);
-    }
 }
-

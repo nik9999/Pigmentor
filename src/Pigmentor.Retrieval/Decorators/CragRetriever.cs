@@ -46,17 +46,22 @@ public sealed class CragRetriever : IRetriever
 
         var candidates = await _inner.RetrieveAsync(request with { TopK = request.TopK * 2 }, cancellationToken).ConfigureAwait(false);
         var graded = new List<RetrievalResult>();
+        var correctCount = 0;
         foreach (var c in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var grade = await GradeAsync(request.Query, c.Chunk.Text, cancellationToken).ConfigureAwait(false);
+            if (grade == Grade.Correct)
+            {
+                correctCount++;
+            }
             if (grade != Grade.Incorrect)
             {
                 graded.Add(c);
             }
         }
 
-        if (graded.Count == 0 && WebFallback is not null)
+        if (correctCount == 0 && WebFallback is not null)
         {
             return await WebFallback.RetrieveAsync(request, cancellationToken).ConfigureAwait(false);
         }

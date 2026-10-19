@@ -63,6 +63,11 @@ public sealed class EmbeddingService : IEmbeddingService
         var generated = await _generator.GenerateAsync(
             [_prompt.Apply(chunk.Text, EmbeddingTaskType.Document)],
             cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (generated.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Embedding provider '{EmbeddingModel}' returned no vectors for document chunk '{chunk.ChunkId}'.");
+        }
         return new EmbeddedChunk(chunk, generated[0].Vector, EmbeddingModel);
     }
 
@@ -74,6 +79,11 @@ public sealed class EmbeddingService : IEmbeddingService
         var generated = await _generator.GenerateAsync(
             [_prompt.Apply(query, EmbeddingTaskType.Query)],
             cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (generated.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Embedding provider '{EmbeddingModel}' returned no vectors for the query.");
+        }
         return generated[0].Vector;
     }
 

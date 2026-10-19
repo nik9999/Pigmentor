@@ -168,18 +168,15 @@ public sealed class GigaChatClient : IDisposable
         ThrowIfDisposed();
 
         request.Stream = true;
-        var token = await _authClient.GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-
         var endpoint = new Uri(_options.BaseUrl.ToString().TrimEnd('/') + "/chat/completions");
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-        httpRequest.Content = JsonContent.Create(request);
-
-        using var response = await _httpClient.SendAsync(
-            httpRequest,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken).ConfigureAwait(false);
+        using var response = await SendWithRetryAsync(token =>
+        {
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
+            httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+            httpRequest.Content = JsonContent.Create(request);
+            return httpRequest;
+        }, cancellationToken, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -385,19 +382,20 @@ public sealed class GigaChatClient : IDisposable
 
     private async Task<HttpResponseMessage> SendWithRetryAsync(
         Func<string, HttpRequestMessage> requestFactory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead)
     {
         int maxAttempts = Math.Max(1, _options.MaxRetries + 1);
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
             var token = await _authClient.GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-            var request = requestFactory(token);
+            using var request = requestFactory(token);
 
             HttpResponseMessage? response = null;
             try
             {
-                response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+                response = await _httpClient.SendAsync(request, completionOption, cancellationToken).ConfigureAwait(false);
 
                 if (response.IsSuccessStatusCode)
                 {

@@ -190,6 +190,21 @@ public class RetrievalPropagationTests
     }
 
     [Fact]
+    public async Task CragRetriever_UsesFallbackWhenAllCandidatesAreAmbiguous()
+    {
+        var chat = new SimpleChatClient("AMBIGUOUS");
+        var inner = new RecordingRetriever("inner", [new RetrievalResult(CreateChunk("c1", "candidate", "Engineering"), 0.8)]);
+        var fallback = new RecordingRetriever("fallback");
+        var crag = new CragRetriever(inner, chat) { WebFallback = fallback };
+
+        var results = await crag.RetrieveAsync(new RetrievalRequest("query", 1));
+
+        Assert.Empty(results);
+        Assert.NotNull(fallback.LastRequest);
+        Assert.Equal("query", fallback.LastRequest.Query);
+    }
+
+    [Fact]
     public async Task HybridDatabaseRetriever_PropagatesMetadataFilter_ToBothLegs()
     {
         var vectorRecorder = new RecordingRetriever("vector");

@@ -63,13 +63,13 @@ public sealed class HostingTests
     {
         var services = new ServiceCollection();
         services.AddPigmentor()
-            .UseGigaChat(authorizationKey: "dGVzdC1hdXRoLWtleQ==", chatModel: "GigaChat-2-Pro", embeddingModel: "Embeddings");
+            .UseGigaChat(authorizationKey: "dGVzdC1hdXRoLWtleQ==", chatModel: "GigaChat-2-Pro");
 
         using var provider = services.BuildServiceProvider();
 
         Assert.NotNull(provider.GetService<GigaChatClient>());
         Assert.NotNull(provider.GetService<IChatClient>());
-        Assert.NotNull(provider.GetService<IEmbeddingGenerator<string, Embedding<float>>>());
+        Assert.Null(provider.GetService<IEmbeddingGenerator<string, Embedding<float>>>());
     }
 
     [Fact]
@@ -217,4 +217,3 @@ public sealed class HostingTests
 #pragma warning restore CS0618
     }
 }
-

@@ -28,6 +28,7 @@
     <ProjectReference Include="..\..\src\Pigmentor.Hosting\Pigmentor.Hosting.csproj" />
     <ProjectReference Include="..\..\src\Pigmentor.VectorStore.SqliteVec\Pigmentor.VectorStore.SqliteVec.csproj" />
     <ProjectReference Include="..\..\src\Pigmentor.GigaChat\Pigmentor.GigaChat.csproj" />
+    <ProjectReference Include="..\..\src\Pigmentor.Evaluation\Pigmentor.Evaluation.csproj" />
   </ItemGroup>
 
 </Project>
