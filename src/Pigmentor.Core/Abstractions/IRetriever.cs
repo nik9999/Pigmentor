@@ -1,4 +1,5 @@
 using Pigmentor.Core.Documents;
+using Pigmentor.Core.Filtering;
 
 namespace Pigmentor.Core.Abstractions;
 
@@ -19,4 +20,35 @@ public interface IRetriever
         string query,
         int topK,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Retrieve up to results for <paramref name="request"/>, applying any specified
+    /// metadata pre-filtering before top-K selection where supported.
+    /// Default implementation forwards to <see cref="RetrieveAsync(string, int, CancellationToken)"/>
+    /// if no filter is requested, or throws <see cref="NotSupportedException"/> if a filter is provided
+    /// but the retriever does not support it.
+    /// </summary>
+    Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.Filter is not null)
+        {
+            throw new NotSupportedException($"Retriever '{Strategy}' does not support metadata filtering.");
+        }
+
+        return RetrieveAsync(request.Query, request.TopK, cancellationToken);
+    }
+
+    /// <summary>
+    /// Retrieve up to <paramref name="topK"/> results for <paramref name="query"/> with an optional metadata filter.
+    /// </summary>
+    Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        string query,
+        int topK,
+        MetadataFilter? filter,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK, filter), cancellationToken);
 }

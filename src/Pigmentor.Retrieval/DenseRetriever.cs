@@ -26,15 +26,19 @@ public sealed class DenseRetriever : IRetriever
 
     public string Strategy => "dense";
 
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(query);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        ArgumentNullException.ThrowIfNull(request);
 
-        var queryVec = await _embeddings.EmbedQueryAsync(query, cancellationToken).ConfigureAwait(false);
-        return await _store.SearchAsync(queryVec, topK, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var queryVec = await _embeddings.EmbedQueryAsync(request.Query, cancellationToken).ConfigureAwait(false);
+        return await _store.SearchAsync(queryVec, request.TopK, request.Filter, cancellationToken).ConfigureAwait(false);
     }
 }

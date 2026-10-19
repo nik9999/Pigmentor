@@ -1,44 +1,24 @@
 namespace Pigmentor.Hosting;
 
 /// <summary>
-/// Options for configuring high-level RAG pipeline components.
+/// Legacy options surface from earlier chapters.
 /// </summary>
+[Obsolete("RagPipelineOptions is deprecated because it did not actually wire up underlying services. Use services.AddPigmentor() and fluent provider/retriever extensions directly.")]
 public sealed class RagPipelineOptions
 {
-    public string? QdrantConnectionString { get; private set; }
-    public string? Neo4jConnectionString { get; private set; }
-    public string? RedisConnectionString { get; private set; }
-    public bool RerankingEnabled { get; private set; }
-    public bool AuditingEnabled { get; private set; }
+    [Obsolete("Use services.AddPigmentor() with retrieval provider extensions instead.")]
+    public RagPipelineOptions UseQdrant(string connectionString) => this;
 
-    public RagPipelineOptions UseQdrant(string connectionString)
-    {
-        QdrantConnectionString = connectionString;
-        return this;
-    }
+    [Obsolete("Use services.AddPigmentor() with retrieval provider extensions instead.")]
+    public RagPipelineOptions UseNeo4j(string connectionString) => this;
 
-    public RagPipelineOptions UseNeo4j(string connectionString)
-    {
-        Neo4jConnectionString = connectionString;
-        return this;
-    }
+    [Obsolete("Use services.AddPigmentor() with retrieval provider extensions instead.")]
+    public RagPipelineOptions EnableCaching(string redisConnectionString) => this;
 
-    public RagPipelineOptions EnableCaching(string redisConnectionString)
-    {
-        RedisConnectionString = redisConnectionString;
-        return this;
-    }
+    [Obsolete("Use services.AddPigmentor() with retrieval provider extensions instead.")]
+    public RagPipelineOptions EnableReranking() => this;
 
-    public RagPipelineOptions EnableReranking()
-    {
-        RerankingEnabled = true;
-        return this;
-    }
-
-    public RagPipelineOptions EnableAuditing()
-    {
-        AuditingEnabled = true;
-        return this;
-    }
+    [Obsolete("Use services.AddPigmentor() with retrieval provider extensions instead.")]
+    public RagPipelineOptions EnableAuditing() => this;
 }
 

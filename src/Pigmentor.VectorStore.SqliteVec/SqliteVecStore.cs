@@ -17,7 +17,15 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable
 
     public SqliteVecStore(string connectionString)
     {
-        SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_dynamic_cdecl());
+        try
+        {
+            SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_dynamic_cdecl());
+        }
+        catch
+        {
+            // Fall back to ambient SQLite provider if dynamic_cdecl has no native library loaded
+        }
+
         _connection = new SqliteConnection(connectionString);
         _connection.Open();
         Initialize();
@@ -53,6 +61,11 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable
     public async Task<IReadOnlyList<RetrievalResult>> SearchAsync(ReadOnlyMemory<float> queryVector, int topK, MetadataFilter? filter = null, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
+        if (filter is not null)
+        {
+            throw new NotSupportedException("SqliteVecStore does not currently support metadata filtering.");
+        }
+
         var results = new List<RetrievalResult>();
         await using var command = _connection.CreateCommand();
         command.CommandText = "SELECT id, document_id, content, metadata, embedding FROM chunks";

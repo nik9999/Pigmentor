@@ -185,7 +185,8 @@ public sealed class RagPipelineTests
 
         var response = await pipeline.AskAsync(request);
 
-        Assert.Equal(2, response.Diagnostics.RetrievedCandidateCount);
+        // Pre-filter narrowed candidates in retrieval layer to 1 matching HR candidate
+        Assert.Equal(1, response.Diagnostics.RetrievedCandidateCount);
         Assert.Equal(1, response.Diagnostics.ContextSourceCount);
         Assert.Single(response.Citations);
         Assert.Equal("hr-1", response.Citations[0].DocumentId);
@@ -308,24 +309,80 @@ public sealed class RagPipelineTests
     }
 
     [Fact]
-    public async Task Reranker_ReceivesCompleteCandidatePool()
+    public async Task MetadataFilter_IsPassedToRetrievalLayer()
     {
-        var metadata = new DocumentMetadata("doc", "", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
-        var candidates = Enumerable.Range(0, 8).Select(i =>
+        var metadata = new DocumentMetadata("doc", Silo: "Alpha", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
+        var chunk = new DocumentChunk("doc#1", "doc", 0, "Chunk text", 0, 10, metadata);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+        var chat = new FakeChatGenerator("Response [S1]");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var filter = MetadataFilter.Where(m => m.Silo == "Alpha");
+        await pipeline.AskAsync(new RagRequest("Question", metadataFilter: filter));
+
+        Assert.NotNull(retriever.LastRequest);
+        Assert.Same(filter, retriever.LastRequest.Filter);
+    }
+
+    [Fact]
+    public async Task MandatoryFilter_AppliedBeforeReranking_RerankerOnlyReceivesFilteredCandidates()
+    {
+        var metaAlpha = new DocumentMetadata("docA", Silo: "Alpha", "", "", "", "Ref", 0, "", DateOnly.MinValue, "DocA");
+        var metaBeta = new DocumentMetadata("docB", Silo: "Beta", "", "", "", "Ref", 0, "", DateOnly.MinValue, "DocB");
+
+        var candidates = new List<RetrievalResult>
         {
-            var chunk = new DocumentChunk($"doc#{i}", "doc", i, $"Chunk {i}", 0, 10, metadata);
-            return new RetrievalResult(chunk, 1.0);
-        }).ToList();
+            new(new DocumentChunk("docA#1", "docA", 0, "Alpha chunk 1", 0, 10, metaAlpha), 1.0),
+            new(new DocumentChunk("docB#1", "docB", 0, "Beta chunk 1", 0, 10, metaBeta), 0.9),
+            new(new DocumentChunk("docA#2", "docA", 1, "Alpha chunk 2", 0, 10, metaAlpha), 0.8),
+            new(new DocumentChunk("docB#2", "docB", 1, "Beta chunk 2", 0, 10, metaBeta), 0.7)
+        };
 
         var recorder = new RecordingReranker();
         var retriever = new FakeRetriever(candidates);
         var chat = new FakeChatGenerator("Response [S1]");
         var pipeline = new RagPipeline(retriever, chat, reranker: recorder);
 
-        await pipeline.AskAsync(new RagRequest("Question", topK: 8));
+        var filter = MetadataFilter.Where(m => m.Silo == "Alpha");
+        var response = await pipeline.AskAsync(new RagRequest("Question", metadataFilter: filter, topK: 4));
 
-        // Reranker received all 8 candidates
-        Assert.Equal(8, recorder.ReceivedCandidateCount);
+        // Reranker received ONLY Alpha candidates (2), not the unfiltered 4
+        Assert.Equal(2, recorder.ReceivedCandidates.Count);
+        Assert.All(recorder.ReceivedCandidates, c => Assert.Equal("Alpha", c.Chunk.Metadata.Silo));
+    }
+
+    [Fact]
+    public async Task UnsupportedRetriever_ThrowsNotSupportedException_WhenFilterProvided()
+    {
+        IRetriever retriever = new UnsupportedFilterRetriever();
+        var filter = MetadataFilter.Where(m => m.Silo == "Alpha");
+        var request = new RetrievalRequest("query", 5, filter);
+
+        await Assert.ThrowsAsync<NotSupportedException>(() => retriever.RetrieveAsync(request));
+    }
+
+    private static readonly float[] DummyVector = [1f, 0f];
+
+    [Fact]
+    public async Task SqliteVecStore_ThrowsNotSupportedException_WhenFilterProvided()
+    {
+        using var store = new Pigmentor.VectorStore.SqliteVec.SqliteVecStore("Data Source=:memory:");
+        var filter = MetadataFilter.Where(m => m.Silo == "Alpha");
+
+        await Assert.ThrowsAsync<NotSupportedException>(() =>
+            store.SearchAsync(DummyVector, topK: 5, filter: filter));
+    }
+
+    [Fact]
+    public void ContextBudget_PromptOverhead_DeductedFromContextAllowance()
+    {
+        var budget = new ContextBudget(MaxTotalTokens: 1000, ReservedOutputTokens: 250);
+
+        // Prompt overhead with question and system instructions = 100 tokens
+        var allowance = budget.ComputeAvailableContextTokens(promptOverheadTokens: 100);
+
+        // 1000 - 250 - 100 = 650 tokens
+        Assert.Equal(650, allowance);
     }
 
     [Fact]
@@ -388,7 +445,8 @@ public sealed class RagPipelineTests
 
     private sealed class RecordingReranker : IReranker
     {
-        public int ReceivedCandidateCount { get; private set; }
+        public int ReceivedCandidateCount => ReceivedCandidates.Count;
+        public IReadOnlyList<RetrievalResult> ReceivedCandidates { get; private set; } = [];
 
         public Task<IReadOnlyList<RetrievalResult>> RerankAsync(
             string query,
@@ -396,8 +454,18 @@ public sealed class RagPipelineTests
             int topK,
             CancellationToken cancellationToken = default)
         {
-            ReceivedCandidateCount = candidates.Count;
+            ReceivedCandidates = candidates;
             return Task.FromResult<IReadOnlyList<RetrievalResult>>(candidates.Take(topK).ToList());
+        }
+    }
+
+    private sealed class UnsupportedFilterRetriever : IRetriever
+    {
+        public string Strategy => "unsupported";
+
+        public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(string query, int topK, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<RetrievalResult>>([]);
         }
     }
 
@@ -452,10 +520,21 @@ public sealed class RagPipelineTests
 
         public string Strategy => "fake";
 
+        public RetrievalRequest? LastRequest { get; private set; }
+
         public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(string query, int topK, CancellationToken cancellationToken = default)
         {
+            return RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+        }
+
+        public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(RetrievalRequest request, CancellationToken cancellationToken = default)
+        {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult<IReadOnlyList<RetrievalResult>>(_results.Take(topK).ToList());
+            LastRequest = request;
+            var matches = request.Filter is not null
+                ? _results.Where(r => request.Filter.Matches(r.Chunk.Metadata))
+                : _results;
+            return Task.FromResult<IReadOnlyList<RetrievalResult>>(matches.Take(request.TopK).ToList());
         }
     }
 

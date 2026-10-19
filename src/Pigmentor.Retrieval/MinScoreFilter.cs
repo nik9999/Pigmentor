@@ -45,12 +45,21 @@ public sealed class MinScoreFilter : IRetriever
     public string Strategy => $"min-score({_inner.Strategy})";
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+    /// <inheritdoc />
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
         int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
         CancellationToken cancellationToken = default)
     {
-        var results = await _inner.RetrieveAsync(query, topK, cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(request);
+
+        var results = await _inner.RetrieveAsync(request, cancellationToken).ConfigureAwait(false);
 
         // A zero (or negative) floor is a pass-through: keep the inner list as-is
         // so the decorator adds no cost when abstention is not configured.

@@ -65,6 +65,7 @@ public static class GigaChatHostingExtensions
 
         EnsureGigaChatClientRegistered(builder.Services, configure);
 
+        builder.Services.RemoveAll<IChatClient>();
         builder.Services.AddSingleton<IChatClient>(sp =>
         {
             var gigaChat = sp.GetRequiredService<GigaChatClient>();
@@ -78,6 +79,7 @@ public static class GigaChatHostingExtensions
 
     /// <summary>
     /// Configures GigaChat as the primary <see cref="IEmbeddingGenerator{TInput, TEmbedding}"/> provider.
+    /// Overwrites any previously registered <see cref="IEmbeddingGenerator{TInput, TEmbedding}"/> ("last explicit registration wins").
     /// </summary>
     public static PigmentorBuilder UseGigaChatEmbeddings(
         this PigmentorBuilder builder,
@@ -87,6 +89,7 @@ public static class GigaChatHostingExtensions
 
         EnsureGigaChatClientRegistered(builder.Services, configure);
 
+        builder.Services.RemoveAll<IEmbeddingGenerator<string, Embedding<float>>>();
         builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
         {
             var gigaChat = sp.GetRequiredService<GigaChatClient>();
@@ -114,7 +117,7 @@ public static class GigaChatHostingExtensions
             var options = sp.GetRequiredService<IOptions<GigaChatClientOptions>>().Value;
 
             // Fallback to Pigmentor:Llm options if AuthorizationKey is not set on GigaChatClientOptions
-            if (string.IsNullOrWhiteSpace(options.AuthorizationKey))
+            if (string.IsNullOrWhiteSpace(options.ResolveAuthorizationKey()))
             {
                 var llmOpts = sp.GetService<IOptions<LlmClientOptions>>()?.Value;
                 if (!string.IsNullOrWhiteSpace(llmOpts?.AuthorizationKey))
@@ -123,12 +126,21 @@ public static class GigaChatHostingExtensions
                 }
                 if (!string.IsNullOrWhiteSpace(llmOpts?.Endpoint) && !llmOpts.Endpoint.Contains("localhost"))
                 {
-                    options.BaseUrl = new Uri(llmOpts.Endpoint);
+                    if (Uri.TryCreate(llmOpts.Endpoint, UriKind.Absolute, out var uri))
+                    {
+                        options.BaseUrl = uri;
+                    }
                 }
                 if (!string.IsNullOrWhiteSpace(llmOpts?.ChatModel))
                 {
                     options.DefaultModel = llmOpts.ChatModel;
                 }
+            }
+
+            var authKey = options.ResolveAuthorizationKey();
+            if (string.IsNullOrWhiteSpace(authKey))
+            {
+                throw new InvalidOperationException("GigaChat AuthorizationKey (or ClientId and ClientSecret) is required.");
             }
 
             return new GigaChatClient(options);

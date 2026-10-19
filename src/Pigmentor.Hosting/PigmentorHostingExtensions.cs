@@ -36,8 +36,10 @@ public static class PigmentorHostingExtensions
     }
 
     /// <summary>
-    /// High-level registration API for the Pigmentor RAG pipeline.
+    /// Legacy registration API for the Pigmentor RAG pipeline.
+    /// Prefer <see cref="AddPigmentor(IServiceCollection, IConfiguration?)"/> and explicit builder extensions.
     /// </summary>
+    [Obsolete("Use services.AddPigmentor(configuration) instead. RagPipelineOptions does not configure backend stores.")]
     public static PigmentorBuilder AddPigmentorRagPipeline(
         this IServiceCollection services,
         IConfiguration configuration,
@@ -46,10 +48,6 @@ public static class PigmentorHostingExtensions
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
 
-        var options = new RagPipelineOptions();
-        configure?.Invoke(options);
-
-        var builder = services.AddPigmentor(configuration);
-        return builder;
+        return services.AddPigmentor(configuration);
     }
 }

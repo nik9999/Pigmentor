@@ -28,6 +28,7 @@ public sealed class RagPipeline : IRagPipeline
     private readonly IChatGenerator _chat;
     private readonly IReranker _reranker;
     private readonly IContextBuilder _contextBuilder;
+    private readonly ITokenCounter _tokenCounter;
     private readonly RagPipelineSettings _settings;
 
     public RagPipeline(
@@ -69,9 +70,8 @@ public sealed class RagPipeline : IRagPipeline
         _chat = chat ?? throw new ArgumentNullException(nameof(chat));
         _reranker = reranker ?? NoOpReranker.Instance;
         _settings = settings ?? new RagPipelineSettings();
-
-        var counter = tokenCounter ?? new TokenCounter();
-        _contextBuilder = contextBuilder ?? new ContextBuilder(counter, _settings.ContextOptions with { Budget = _settings.Budget });
+        _tokenCounter = tokenCounter ?? new TokenCounter();
+        _contextBuilder = contextBuilder ?? new ContextBuilder(_tokenCounter, _settings.ContextOptions with { Budget = _settings.Budget });
     }
 
     /// <inheritdoc />
@@ -85,16 +85,17 @@ public sealed class RagPipeline : IRagPipeline
         var stopwatch = Stopwatch.StartNew();
         var topK = request.TopK ?? _settings.DefaultTopK;
 
-        // 1. Candidate retrieval
-        var candidatePool = await _retriever.RetrieveAsync(request.Question, topK, cancellationToken).ConfigureAwait(false);
+        // 1. Candidate retrieval (passing request with MetadataFilter into retrieval layer)
+        var retrievalRequest = new RetrievalRequest(request.Question, topK, request.MetadataFilter);
+        var candidatePool = await _retriever.RetrieveAsync(retrievalRequest, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
 
-        // 2. Pre-context filtering (if requested)
+        // 2. Defensive post-filtering (guarantees adherence even if retrieval backend had loose semantics)
         IReadOnlyList<RetrievalResult> filteredCandidates = request.MetadataFilter is not null
             ? candidatePool.Where(s => request.MetadataFilter.Matches(s.Chunk.Metadata)).ToList()
             : candidatePool;
 
-        // 3. Reranker receives the complete candidate pool
+        // 3. Reranker receives candidates that satisfied mandatory filtering
         var rerankedCandidates = await _reranker.RerankAsync(
             request.Question,
             filteredCandidates,
@@ -102,8 +103,10 @@ public sealed class RagPipeline : IRagPipeline
             cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
 
-        // 4. Context builder enforces token budget, interleaving, and [S1], [S2] source mapping
-        var ragContext = _contextBuilder.BuildContext(rerankedCandidates, _settings.Budget);
+        // 4. Context builder enforces token budget, accounting for prompt instructions and question overhead
+        var promptOverheadTokens = _tokenCounter.CountTokens(BuildPrompt(request.Question, RagContext.Empty));
+        var contextAllowance = _settings.Budget.ComputeAvailableContextTokens(promptOverheadTokens);
+        var ragContext = _contextBuilder.BuildContext(rerankedCandidates, contextAllowance);
 
         // 5. Prompt assembly requiring explicit [S1], [S2] references
         var prompt = BuildPrompt(request.Question, ragContext);

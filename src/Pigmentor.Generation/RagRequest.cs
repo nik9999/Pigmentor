@@ -14,6 +14,11 @@ public sealed record RagRequest
 
     /// <summary>
     /// Optional conversation identifier for multi-turn session tracking.
+    /// <para>
+    /// <b>Note:</b> In the current pipeline implementation, conversational memory and query rewriting
+    /// are not yet active; this property is part of the contract for caller session correlation
+    /// and subsequent pipeline stages.
+    /// </para>
     /// </summary>
     public string? ConversationId { get; init; }
 
