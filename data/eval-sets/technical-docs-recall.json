@@ -1,0 +1,17 @@
+[
+  {
+    "id": "technical-re-001",
+    "query": "ПИМФ 426439 004 руководство по эксплуатации",
+    "relevantDocuments": ["ПИМФ.426439.004 РЭ Сv13.0.pdf"]
+  },
+  {
+    "id": "technical-ps-001",
+    "query": "ПИМФ 426439 004 паспорт изделия",
+    "relevantDocuments": ["ПИМФ.426439.004 ПС Сv13.0.pdf"]
+  },
+  {
+    "id": "technical-mva8-001",
+    "query": "re mva8 техническая документация",
+    "relevantDocuments": ["re_mva8.pdf"]
+  }
+]

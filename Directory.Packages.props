@@ -1,0 +1,10 @@
+<Project>
+  <!--
+    Projects currently declare explicit package versions while the solution is
+    being migrated from SmartDocs. Keep central package management disabled
+    until all project files are normalized in one change.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>
