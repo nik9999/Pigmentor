@@ -1,0 +1,727 @@
+#pragma warning disable CA1861 // Prefer 'static readonly' fields over constant array arguments
+using System.Runtime.CompilerServices;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Pigmentor.Core.Abstractions;
+using Pigmentor.Core.Documents;
+using Pigmentor.Core.Filtering;
+using Pigmentor.Ingestion.Chunking;
+using Pigmentor.Ingestion.DependencyInjection;
+using Pigmentor.Ingestion.Events;
+using Pigmentor.Ingestion.Fingerprints;
+using Pigmentor.Ingestion.Lifecycle;
+using Pigmentor.Ingestion.Services;
+using Pigmentor.VectorStore.SqliteVec;
+using Xunit;
+
+namespace Pigmentor.Tests;
+
+public sealed class IngestionStateTests : IDisposable
+{
+    private readonly string _tempDbPath;
+    private readonly string _connectionString;
+
+    public IngestionStateTests()
+    {
+        _tempDbPath = Path.Combine(Path.GetTempPath(), $"pigmentor_ingest_{Guid.NewGuid():N}.db");
+        _connectionString = $"Data Source={_tempDbPath}";
+    }
+
+    public void Dispose()
+    {
+        SqliteConnection.ClearAllPools();
+        try
+        {
+            if (File.Exists(_tempDbPath))
+            {
+                File.Delete(_tempDbPath);
+            }
+            var walFile = _tempDbPath + "-wal";
+            if (File.Exists(walFile))
+            {
+                File.Delete(walFile);
+            }
+            var shmFile = _tempDbPath + "-shm";
+            if (File.Exists(shmFile))
+            {
+                File.Delete(shmFile);
+            }
+        }
+        catch
+        {
+            // Best effort cleanup
+        }
+    }
+
+    private static Document CreateDocument(
+        string id,
+        string content,
+        string department = "Engineering",
+        string title = "Title",
+        int fiscalYear = 2024)
+    {
+        var meta = new DocumentMetadata(
+            Id: id,
+            Silo: "technical-docs",
+            Department: department,
+            Office: "Montreal",
+            ConfidentialityLevel: "Internal",
+            DocumentType: "Reference",
+            FiscalYear: fiscalYear,
+            Author: "Author",
+            LastModified: new DateOnly(2024, 6, 1),
+            Title: title);
+
+        return new Document(meta, content, $"{id}.md");
+    }
+
+    // --- 1. Fingerprint Unit Tests ---
+
+    [Fact]
+    public void Fingerprint_DeterministicAndDistinct()
+    {
+        var doc1 = CreateDocument("doc1", "Hello World");
+        var doc2 = CreateDocument("doc1", "Hello World");
+        var doc3 = CreateDocument("doc1", "Different Content");
+
+        var h1 = IngestionFingerprint.ComputeContentHash(doc1.Content);
+        var h2 = IngestionFingerprint.ComputeContentHash(doc2.Content);
+        var h3 = IngestionFingerprint.ComputeContentHash(doc3.Content);
+
+        Assert.Equal(h1, h2);
+        Assert.NotEqual(h1, h3);
+        Assert.Equal(64, h1.Length);
+
+        var m1 = IngestionFingerprint.ComputeMetadataHash(doc1.Metadata);
+        var m2 = IngestionFingerprint.ComputeMetadataHash(doc2.Metadata);
+        Assert.Equal(m1, m2);
+
+        var docModifiedMeta = doc1 with { Metadata = doc1.Metadata with { Department = "Legal" } };
+        var m3 = IngestionFingerprint.ComputeMetadataHash(docModifiedMeta.Metadata);
+        Assert.NotEqual(m1, m3);
+    }
+
+    // --- 2. DocumentChangeClassifier Unit Tests ---
+
+    [Fact]
+    public void DocumentChangeClassifier_ClassifiesAccurately()
+    {
+        var cHash1 = "content-hash-1";
+        var cHash2 = "content-hash-2";
+        var mHash1 = "meta-hash-1";
+        var mHash2 = "meta-hash-2";
+
+        // Null state => New
+        Assert.Equal(DocumentChangeKind.New, DocumentChangeClassifier.Classify(null, cHash1, mHash1));
+
+        // Interrupted/Failed state => New (repair invariant)
+        var processingState = new IngestionDocumentState("default", "d1", cHash1, mHash1, 1, IngestionStatus.Processing, null, []);
+        Assert.Equal(DocumentChangeKind.New, DocumentChangeClassifier.Classify(processingState, cHash1, mHash1));
+
+        var failedState = new IngestionDocumentState("default", "d1", cHash1, mHash1, 1, IngestionStatus.Failed, null, []);
+        Assert.Equal(DocumentChangeKind.New, DocumentChangeClassifier.Classify(failedState, cHash1, mHash1));
+
+        // Succeeded state
+        var succeededState = new IngestionDocumentState("default", "d1", cHash1, mHash1, 1, IngestionStatus.Succeeded, DateTimeOffset.UtcNow, ["c1"]);
+
+        // Same content and metadata => Unchanged
+        Assert.Equal(DocumentChangeKind.Unchanged, DocumentChangeClassifier.Classify(succeededState, cHash1, mHash1));
+
+        // Content changed => ContentChanged
+        Assert.Equal(DocumentChangeKind.ContentChanged, DocumentChangeClassifier.Classify(succeededState, cHash2, mHash1));
+
+        // Metadata changed => MetadataChanged
+        Assert.Equal(DocumentChangeKind.MetadataChanged, DocumentChangeClassifier.Classify(succeededState, cHash1, mHash2));
+
+        // Both changed => ContentAndMetadataChanged
+        Assert.Equal(DocumentChangeKind.ContentAndMetadataChanged, DocumentChangeClassifier.Classify(succeededState, cHash2, mHash2));
+    }
+
+    // --- 3. SqliteIngestionStateStore CRUD & Concurrency ---
+
+    [Fact]
+    public async Task SqliteIngestionStateStore_CrudAndChunks_PersistAccurately()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        var state = new IngestionDocumentState(
+            SourceId: "tenant-a",
+            DocumentId: "doc-100",
+            ContentHash: "hash-c",
+            MetadataHash: "hash-m",
+            Version: 1,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["doc-100#0", "doc-100#1", "doc-100#2"]);
+
+        await store.SaveAsync(state);
+
+        var retrieved = await store.GetAsync("doc-100", "tenant-a");
+        Assert.NotNull(retrieved);
+        Assert.Equal("tenant-a", retrieved.SourceId);
+        Assert.Equal("doc-100", retrieved.DocumentId);
+        Assert.Equal("hash-c", retrieved.ContentHash);
+        Assert.Equal("hash-m", retrieved.MetadataHash);
+        Assert.Equal(1, retrieved.Version);
+        Assert.Equal(IngestionStatus.Succeeded, retrieved.Status);
+        Assert.Equal(3, retrieved.ChunkIds.Count);
+        Assert.Equal("doc-100#0", retrieved.ChunkIds[0]);
+        Assert.Equal("doc-100#1", retrieved.ChunkIds[1]);
+        Assert.Equal("doc-100#2", retrieved.ChunkIds[2]);
+
+        // List
+        var list = await store.ListAsync("tenant-a");
+        Assert.Single(list);
+        Assert.Equal("doc-100", list[0].DocumentId);
+        Assert.Equal(3, list[0].ChunkIds.Count);
+
+        // Delete
+        await store.DeleteAsync("doc-100", "tenant-a");
+        var afterDelete = await store.GetAsync("doc-100", "tenant-a");
+        Assert.Null(afterDelete);
+    }
+
+    [Fact]
+    public async Task SqliteIngestionStateStore_OptimisticConcurrency_ThrowsOnViolation()
+    {
+        using var store = new SqliteIngestionStateStore(_connectionString);
+
+        var state1 = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-concurrency",
+            ContentHash: "h1",
+            MetadataHash: "m1",
+            Version: 1,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c1"]);
+
+        // expectedVersion = 0 on new doc -> succeeds
+        await store.SaveAsync(state1, expectedVersion: 0);
+
+        // expectedVersion = 0 when already exists -> throws
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.SaveAsync(state1, expectedVersion: 0));
+
+        // expectedVersion = 99 (mismatch) -> throws
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.SaveAsync(state1 with { Version = 2 }, expectedVersion: 99));
+
+        // expectedVersion = 1 (matching) -> succeeds
+        await store.SaveAsync(state1 with { Version = 2 }, expectedVersion: 1);
+
+        var final = await store.GetAsync("doc-concurrency", "default");
+        Assert.NotNull(final);
+        Assert.Equal(2, final.Version);
+    }
+
+    // --- 4. Schema Migration v1 -> v2 ---
+
+    [Fact]
+    public async Task SchemaMigration_V1ToV2_PreservesExistingVectorsAndAddsIngestionTables()
+    {
+        // 1. Manually bootstrap a v1 schema database with an indexed vector
+        SqliteVecExtensionLoader.EnsureSqliteProvider();
+        using (var conn = new SqliteConnection(_connectionString))
+        {
+            conn.Open();
+            SqliteVecExtensionLoader.Load(conn);
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                CREATE TABLE pigmentor_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO pigmentor_metadata (key, value) VALUES ('dimensions', '2'), ('embedding_model', 'test-model');
+
+                CREATE TABLE chunks (
+                    row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chunk_id TEXT UNIQUE NOT NULL,
+                    document_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    start_char_offset INTEGER NOT NULL,
+                    end_char_offset INTEGER NOT NULL,
+                    silo TEXT NOT NULL,
+                    department TEXT NOT NULL,
+                    office TEXT NOT NULL,
+                    confidentiality_level TEXT NOT NULL,
+                    document_type TEXT NOT NULL,
+                    fiscal_year INTEGER NOT NULL,
+                    author TEXT NOT NULL,
+                    last_modified TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    embedding_model TEXT NOT NULL
+                );
+
+                CREATE VIRTUAL TABLE vec_chunks USING vec0(
+                    embedding float[2] distance_metric=cosine
+                );
+                PRAGMA user_version = 1;
+
+                INSERT INTO chunks (
+                    row_id, chunk_id, document_id, chunk_index, text, start_char_offset, end_char_offset,
+                    silo, department, office, confidentiality_level, document_type, fiscal_year, author,
+                    last_modified, title, embedding_model
+                ) VALUES (
+                    1, 'v1-chunk', 'v1-doc', 0, 'V1 content', 0, 10,
+                    'technical-docs', 'Engineering', 'Montreal', 'Internal', 'Reference', 2024, 'Author',
+                    '2024-06-01', 'V1 Title', 'test-model'
+                );
+            ";
+            cmd.ExecuteNonQuery();
+
+            // Insert vector into vec_chunks
+            using var vecCmd = conn.CreateCommand();
+            vecCmd.CommandText = "INSERT INTO vec_chunks (rowid, embedding) VALUES (1, $vec);";
+            var vecBytes = new byte[sizeof(float) * 2];
+            Buffer.BlockCopy(new float[] { 1f, 0f }, 0, vecBytes, 0, vecBytes.Length);
+            vecCmd.Parameters.AddWithValue("$vec", vecBytes);
+            vecCmd.ExecuteNonQuery();
+        }
+
+        // 2. Open with SqliteVecStore (which will detect v1 and migrate to v2)
+        using (var store = new SqliteVecStore(new SqliteVecStoreOptions
+        {
+            ConnectionString = _connectionString,
+            Dimensions = 2,
+            EmbeddingModel = "test-model"
+        }))
+        {
+            // Verify search works on the pre-existing v1 data
+            var results = await store.SearchAsync(new float[] { 1f, 0f }, topK: 1);
+            Assert.Single(results);
+            Assert.Equal("v1-chunk", results[0].Chunk.ChunkId);
+            Assert.Equal("V1 content", results[0].Chunk.Text);
+        }
+
+        // 3. Verify user_version is now 2
+        using (var conn = new SqliteConnection(_connectionString))
+        {
+            conn.Open();
+            using var checkCmd = conn.CreateCommand();
+            checkCmd.CommandText = "PRAGMA user_version;";
+            var version = Convert.ToInt64(checkCmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+            Assert.Equal(2, version);
+        }
+
+        // 4. Verify SqliteIngestionStateStore operates on the migrated database
+        using (var stateStore = new SqliteIngestionStateStore(_connectionString))
+        {
+            var st = new IngestionDocumentState("default", "v1-doc", "chash", "mhash", 1, IngestionStatus.Succeeded, DateTimeOffset.UtcNow, ["v1-chunk"]);
+            await stateStore.SaveAsync(st);
+            var readBack = await stateStore.GetAsync("v1-doc");
+            Assert.NotNull(readBack);
+            Assert.Equal("v1-chunk", readBack.ChunkIds[0]);
+        }
+    }
+
+    // --- 5. High-Level DocumentIngestionService Lifecycle Tests ---
+
+    [Fact]
+    public async Task DocumentIngestionService_NewDocument_IngestedAndPersisted()
+    {
+        var options = new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" };
+        using var vectorStore = new SqliteVecStore(options);
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        var chunker = new FixedSizeChunker(50, 0);
+        var embedder = new TestEmbeddingService(dimensions: 2, model: "test-model");
+        var service = new DocumentIngestionService(stateStore, vectorStore, chunker, embedder);
+
+        var doc = CreateDocument("doc-1", "This is a paragraph of content that fits in a single chunk.");
+        var result = await service.IngestAsync(doc);
+
+        Assert.Equal("doc-1", result.DocumentId);
+        Assert.Equal(DocumentChangeKind.New, result.ChangeKind);
+        Assert.Equal(IngestionStatus.Succeeded, result.Status);
+        Assert.Equal(1, result.Version);
+        Assert.False(result.Skipped);
+        Assert.True(result.ChunksIndexed > 0);
+        Assert.Equal(0, result.ChunksDeleted);
+
+        // Verify state is persisted
+        var persisted = await stateStore.GetAsync("doc-1");
+        Assert.NotNull(persisted);
+        Assert.Equal(1, persisted.Version);
+        Assert.Equal(IngestionStatus.Succeeded, persisted.Status);
+        Assert.NotEmpty(persisted.ChunkIds);
+
+        // Verify vector store can search
+        var search = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 5);
+        Assert.NotEmpty(search);
+        Assert.Equal("doc-1", search[0].Chunk.DocumentId);
+    }
+
+    [Fact]
+    public async Task DocumentIngestionService_RestartSafe_UnchangedDocument_SkippedWithoutEmbedding()
+    {
+        var doc = CreateDocument("doc-restart", "Deterministic content for restart testing.");
+
+        // First run: ingest
+        {
+            using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+            using var stateStore = new SqliteIngestionStateStore(_connectionString);
+            var embedder = new TestEmbeddingService(2, "test-model");
+            var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), embedder);
+
+            var res1 = await service.IngestAsync(doc);
+            Assert.False(res1.Skipped);
+            Assert.True(embedder.CallCount > 0);
+        }
+
+        // Restart simulation: fresh store instances, empty process memory
+        {
+            using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+            using var stateStore = new SqliteIngestionStateStore(_connectionString);
+            var embedder = new TestEmbeddingService(2, "test-model");
+            var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), embedder);
+
+            var res2 = await service.IngestAsync(doc);
+
+            // Verified: classified as Unchanged, skipped, 0 new embedding calls
+            Assert.True(res2.Skipped);
+            Assert.Equal(DocumentChangeKind.Unchanged, res2.ChangeKind);
+            Assert.Equal(0, embedder.CallCount);
+            Assert.Equal(1, res2.Version);
+
+            // Vectors still exist and searchable
+            var search = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 1);
+            Assert.Single(search);
+            Assert.Equal("doc-restart", search[0].Chunk.DocumentId);
+        }
+    }
+
+    [Fact]
+    public async Task DocumentIngestionService_ContentChanged_ReplacesChunksAndIncrementsVersion()
+    {
+        var docV1 = CreateDocument("doc-edit", "Initial content v1.");
+        var docV2 = CreateDocument("doc-edit", "Completely rewritten content v2.");
+
+        // Run v1
+        {
+            using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+            using var stateStore = new SqliteIngestionStateStore(_connectionString);
+            var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+            var res1 = await service.IngestAsync(docV1);
+            Assert.Equal(1, res1.Version);
+        }
+
+        // Run v2 after restart
+        {
+            using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+            using var stateStore = new SqliteIngestionStateStore(_connectionString);
+            var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+
+            var res2 = await service.IngestAsync(docV2);
+            Assert.False(res2.Skipped);
+            Assert.Equal(DocumentChangeKind.ContentChanged, res2.ChangeKind);
+            Assert.Equal(2, res2.Version);
+
+            var search = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 5);
+            Assert.Single(search);
+            Assert.Equal("Completely rewritten content v2.", search[0].Chunk.Text);
+        }
+    }
+
+    [Fact]
+    public async Task DocumentIngestionService_ShrinkingDocument_EliminatesOrphanChunks()
+    {
+        // 3 chunks when split by 10 chars
+        var docBig = CreateDocument("doc-shrink", "1234567890abcdefghijABCDEFGHIJ");
+        // 1 chunk
+        var docSmall = CreateDocument("doc-shrink", "short");
+
+        // Index large document
+        {
+            using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+            using var stateStore = new SqliteIngestionStateStore(_connectionString);
+            var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(10, 0), new TestEmbeddingService(2, "test-model"));
+            var res1 = await service.IngestAsync(docBig);
+            Assert.Equal(3, res1.ChunksIndexed);
+        }
+
+        // Restart and update with shrinking document
+        {
+            using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+            using var stateStore = new SqliteIngestionStateStore(_connectionString);
+            var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(10, 0), new TestEmbeddingService(2, "test-model"));
+
+            var res2 = await service.IngestAsync(docSmall);
+            Assert.Equal(1, res2.ChunksIndexed);
+            Assert.Equal(3, res2.ChunksDeleted);
+
+            // Vector store should now only contain exactly 1 chunk
+            var search = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 10);
+            Assert.Single(search);
+            Assert.Equal("short", search[0].Chunk.Text);
+
+            // State store chunk list matches
+            var st = await stateStore.GetAsync("doc-shrink");
+            Assert.NotNull(st);
+            Assert.Single(st.ChunkIds);
+        }
+    }
+
+    [Fact]
+    public async Task DocumentIngestionService_MetadataChanged_UpdatesChunksInVectorStore()
+    {
+        var docMeta1 = CreateDocument("doc-meta", "Stable content", department: "Engineering");
+        var docMeta2 = CreateDocument("doc-meta", "Stable content", department: "Finance");
+
+        using (var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" }))
+        using (var stateStore = new SqliteIngestionStateStore(_connectionString))
+        {
+            var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+            await service.IngestAsync(docMeta1);
+
+            // Search with Engineering filter -> finds 1
+            var filterEng = MetadataFilter.Where(m => m.Department == "Engineering");
+            var resEng = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 5, filter: filterEng);
+            Assert.Single(resEng);
+
+            // Update metadata to Finance
+            var updateResult = await service.IngestAsync(docMeta2);
+            Assert.Equal(DocumentChangeKind.MetadataChanged, updateResult.ChangeKind);
+
+            // Search with Engineering filter -> 0
+            var resEngAfter = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 5, filter: filterEng);
+            Assert.Empty(resEngAfter);
+
+            // Search with Finance filter -> 1
+            var filterFin = MetadataFilter.Where(m => m.Department == "Finance");
+            var resFinAfter = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 5, filter: filterFin);
+            Assert.Single(resFinAfter);
+        }
+    }
+
+    [Fact]
+    public async Task DocumentIngestionService_SyncAsync_ReconcilesSourceAndDeletesStale()
+    {
+        var docA = CreateDocument("doc-A", "Doc A content");
+        var docB = CreateDocument("doc-B", "Doc B content");
+        var docC = CreateDocument("doc-C", "Doc C content");
+
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+
+        // Initial sync with docA and docB
+        var sync1 = await service.SyncAsync([docA, docB]);
+        Assert.Equal(2, sync1.Ingested);
+        Assert.Equal(0, sync1.Deleted);
+
+        // Next sync with docB (unchanged) and docC (new). docA is missing from source!
+        var sync2 = await service.SyncAsync([docB, docC]);
+        Assert.Equal(1, sync2.Ingested); // docC
+        Assert.Equal(1, sync2.Skipped);  // docB
+        Assert.Equal(1, sync2.Deleted);  // docA was deleted
+
+        // docA is gone from state store and vector store
+        var stateA = await stateStore.GetAsync("doc-A");
+        Assert.Null(stateA);
+
+        var searchA = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 10, filter: MetadataFilter.Where(m => m.Id == "doc-A"));
+        Assert.Empty(searchA);
+
+        // docB and docC exist
+        var stateB = await stateStore.GetAsync("doc-B");
+        var stateC = await stateStore.GetAsync("doc-C");
+        Assert.NotNull(stateB);
+        Assert.NotNull(stateC);
+    }
+
+    [Fact]
+    public async Task DocumentIngestionService_InterruptedIngestion_RecoversSafelyOnNextRun()
+    {
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        // Simulate an interrupted ingestion state in DB
+        var interrupted = new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: "doc-interrupted",
+            ContentHash: "hash-c",
+            MetadataHash: "hash-m",
+            Version: 1,
+            Status: IngestionStatus.Processing, // Left in Processing
+            LastSuccessfulIngestion: null,
+            ChunkIds: []);
+        await stateStore.SaveAsync(interrupted);
+
+        var service = new DocumentIngestionService(stateStore, vectorStore, new FixedSizeChunker(100, 0), new TestEmbeddingService(2, "test-model"));
+
+        var doc = CreateDocument("doc-interrupted", "Recovered content");
+        var res = await service.IngestAsync(doc);
+
+        Assert.Equal(DocumentChangeKind.New, res.ChangeKind); // Correctly treated as New to ensure complete repair
+        Assert.Equal(IngestionStatus.Succeeded, res.Status);
+
+        var state = await stateStore.GetAsync("doc-interrupted");
+        Assert.NotNull(state);
+        Assert.Equal(IngestionStatus.Succeeded, state.Status);
+    }
+
+    // --- 6. DocumentReingestService and IngestEventConsumer Restart Safety ---
+
+    [Fact]
+    public async Task DocumentReingestService_RestartSafe_CleansOrphansUsingPersistentState()
+    {
+        var docId = "reingest-doc";
+        using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = _connectionString, Dimensions = 2, EmbeddingModel = "test-model" });
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        // Step 1: Pre-populate persistent state with 3 chunks
+        var meta = new DocumentMetadata(docId, "silo", "dept", "off", "conf", "type", 2024, "auth", new DateOnly(2024, 1, 1), "title");
+        var c0 = new EmbeddedChunk(new DocumentChunk($"{docId}#0", docId, 0, "c0", 0, 2, meta), new float[] { 1f, 0f }, "test-model");
+        var c1 = new EmbeddedChunk(new DocumentChunk($"{docId}#1", docId, 1, "c1", 2, 4, meta), new float[] { 1f, 0f }, "test-model");
+        var c2 = new EmbeddedChunk(new DocumentChunk($"{docId}#2", docId, 2, "c2", 4, 6, meta), new float[] { 1f, 0f }, "test-model");
+        await vectorStore.UpsertAsync([c0, c1, c2]);
+
+        await stateStore.SaveAsync(new IngestionDocumentState("default", docId, "h", "m", 1, IngestionStatus.Succeeded, DateTimeOffset.UtcNow, [$"{docId}#0", $"{docId}#1", $"{docId}#2"]));
+
+        // Step 2: Fresh DocumentReingestService instance (no in-memory cache seeded)
+        var newChunks = new List<DocumentChunk>
+        {
+            new($"{docId}#0", docId, 0, "new single chunk", 0, 16, meta)
+        };
+
+        var reingestService = new DocumentReingestService(
+            rechunk: (_, _) => Task.FromResult<IReadOnlyList<DocumentChunk>>(newChunks),
+            embedder: new TestEmbeddingService(2, "test-model"),
+            store: vectorStore,
+            stateStore: stateStore);
+
+        await reingestService.ReingestAsync(docId);
+
+        // Verified: orphan chunks #1 and #2 were deleted via state store lookup!
+        var allResults = await vectorStore.SearchAsync(new float[] { 1f, 0f }, topK: 10);
+        Assert.Single(allResults);
+        Assert.Equal($"{docId}#0", allResults[0].Chunk.ChunkId);
+
+        var updatedState = await stateStore.GetAsync(docId);
+        Assert.NotNull(updatedState);
+        Assert.Single(updatedState.ChunkIds);
+        Assert.Equal(2, updatedState.Version);
+    }
+
+    [Fact]
+    public async Task IngestEventConsumer_RestartSafe_DropsStaleVersionUsingPersistentState()
+    {
+        var docId = "consumer-doc";
+        using var stateStore = new SqliteIngestionStateStore(_connectionString);
+
+        // Persist document at version 3
+        await stateStore.SaveAsync(new IngestionDocumentState(
+            SourceId: "default",
+            DocumentId: docId,
+            ContentHash: "h",
+            MetadataHash: "m",
+            Version: 3,
+            Status: IngestionStatus.Succeeded,
+            LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+            ChunkIds: ["c1"]));
+
+        var reingestCalled = false;
+        var reingestMock = new ActionReingestService(() => reingestCalled = true);
+
+        // Fresh IngestEventConsumer instance (empty in-process _lastVersion dictionary)
+        var feed = new ChannelChangeFeed();
+        var consumer = new IngestEventConsumer(
+            feed: feed,
+            reingest: reingestMock,
+            invalidateCache: (_, _) => Task.CompletedTask,
+            logger: NullLogger<IngestEventConsumer>.Instance,
+            tenantId: "default",
+            stateStore: stateStore);
+
+        // Event arrives with version 2 (stale because version 3 was already processed before restart)
+        var staleHandled = await consumer.ProcessAsync(new DocumentChanged(docId, "default", Version: 2));
+        Assert.False(staleHandled);
+        Assert.False(reingestCalled);
+
+        // Event arrives with version 3 (duplicate delivery)
+        var dupHandled = await consumer.ProcessAsync(new DocumentChanged(docId, "default", Version: 3));
+        Assert.False(dupHandled);
+        Assert.False(reingestCalled);
+
+        // Event arrives with version 4 (new)
+        var newHandled = await consumer.ProcessAsync(new DocumentChanged(docId, "default", Version: 4));
+        Assert.True(newHandled);
+        Assert.True(reingestCalled);
+    }
+
+    // --- 7. Dependency Injection Registration Test ---
+
+    [Fact]
+    public void DependencyInjection_RegistersAndResolvesIngestionServices()
+    {
+        var services = new ServiceCollection();
+        services.AddSqliteVecStore(opts =>
+        {
+            opts.ConnectionString = _connectionString;
+            opts.Dimensions = 2;
+            opts.EmbeddingModel = "test-model";
+        });
+        services.AddSqliteIngestionStateStore();
+        services.AddSingleton<IChunker>(new FixedSizeChunker(100, 0));
+        services.AddSingleton<IEmbeddingService>(new TestEmbeddingService(2, "test-model"));
+        services.AddDocumentIngestionService();
+
+        using var provider = services.BuildServiceProvider();
+
+        Assert.NotNull(provider.GetService<IVectorStore>());
+        Assert.NotNull(provider.GetService<IIngestionStateStore>());
+        Assert.NotNull(provider.GetService<IDocumentIngestionService>());
+    }
+
+    private sealed class ActionReingestService : IDocumentReingestService
+    {
+        private readonly Action _onReingest;
+        public ActionReingestService(Action onReingest) => _onReingest = onReingest;
+        public Task ReingestAsync(string documentId, CancellationToken cancellationToken = default)
+        {
+            _onReingest();
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class TestEmbeddingService : IEmbeddingService
+    {
+        public int CallCount { get; private set; }
+
+        public TestEmbeddingService(int dimensions = 2, string model = "test-model")
+        {
+            Dimensions = dimensions;
+            EmbeddingModel = model;
+        }
+
+        public string EmbeddingModel { get; }
+        public int Dimensions { get; }
+
+        public Task<EmbeddedChunk> EmbedAsync(DocumentChunk chunk, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            var vec = new float[Dimensions];
+            vec[0] = 1f;
+            return Task.FromResult(new EmbeddedChunk(chunk, vec, EmbeddingModel));
+        }
+
+        public Task<ReadOnlyMemory<float>> EmbedQueryAsync(string query, CancellationToken cancellationToken = default)
+        {
+            var vec = new float[Dimensions];
+            vec[0] = 1f;
+            return Task.FromResult<ReadOnlyMemory<float>>(vec);
+        }
+
+        public async IAsyncEnumerable<EmbeddedChunk> EmbedAsync(
+            IAsyncEnumerable<DocumentChunk> chunks,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await foreach (var chunk in chunks.WithCancellation(cancellationToken))
+            {
+                yield return await EmbedAsync(chunk, cancellationToken);
+            }
+        }
+    }
+}

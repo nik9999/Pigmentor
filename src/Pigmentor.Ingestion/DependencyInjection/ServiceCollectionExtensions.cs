@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Configuration;
 using Pigmentor.Ingestion.Chunking;
+using Pigmentor.Ingestion.Services;
 
 namespace Pigmentor.Ingestion.DependencyInjection;
 
@@ -55,6 +56,18 @@ public static class ServiceCollectionExtensions
             return new ContextualChunker(inner, chat);
         });
 
+        return services;
+    }
+
+    /// <summary>
+    /// Registers <see cref="DocumentIngestionService"/> as the singleton <see cref="IDocumentIngestionService"/> implementation.
+    /// Requires <see cref="IIngestionStateStore"/>, <see cref="IVectorStore"/>, <see cref="IChunker"/>, and <see cref="IEmbeddingService"/> to be registered.
+    /// </summary>
+    public static IServiceCollection AddDocumentIngestionService(this IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        services.AddSingleton<IDocumentIngestionService, DocumentIngestionService>();
         return services;
     }
 }

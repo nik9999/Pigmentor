@@ -582,7 +582,7 @@ public sealed class SqliteVecIntegrationTests : IDisposable
         });
 
         Assert.Contains("999", ex.Message);
-        Assert.Contains("Expected version 1", ex.Message);
+        Assert.Contains($"Expected version {SqliteVecStore.CurrentSchemaVersion}", ex.Message);
     }
 
     [Fact]

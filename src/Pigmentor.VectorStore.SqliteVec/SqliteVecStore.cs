@@ -13,7 +13,7 @@ namespace Pigmentor.VectorStore.SqliteVec;
 /// </summary>
 public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     private readonly SqliteVecStoreOptions _options;
     private readonly SqliteConnection _connection;
@@ -470,7 +470,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
             checkCmd.CommandText = @"
                 SELECT COUNT(*) FROM sqlite_master 
                 WHERE type IN ('table', 'shadow') 
-                  AND name IN ('chunks', 'pigmentor_metadata', 'vec_chunks');";
+                  AND name IN ('chunks', 'pigmentor_metadata', 'vec_chunks', 'ingestion_documents', 'ingestion_document_chunks');";
             var count = Convert.ToInt64(checkCmd.ExecuteScalar(), CultureInfo.InvariantCulture);
             hasPigmentorTables = count > 0;
         }
@@ -485,6 +485,11 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
 
             CreateSchemaAndMetadata();
         }
+        else if (userVersion == 1)
+        {
+            MigrateFromV1ToV2();
+            ValidateExistingSchema();
+        }
         else if (userVersion == CurrentSchemaVersion)
         {
             ValidateExistingSchema();
@@ -494,6 +499,39 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
             throw new InvalidOperationException(
                 $"Unsupported Pigmentor SQLite schema version {userVersion}. Expected version {CurrentSchemaVersion}.");
         }
+    }
+
+    private void MigrateFromV1ToV2()
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+            CREATE TABLE IF NOT EXISTS ingestion_documents (
+                source_id TEXT NOT NULL,
+                document_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                metadata_hash TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                last_successful_ingestion TEXT NULL,
+                PRIMARY KEY (source_id, document_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS ingestion_document_chunks (
+                source_id TEXT NOT NULL,
+                document_id TEXT NOT NULL,
+                chunk_id TEXT NOT NULL,
+                PRIMARY KEY (source_id, document_id, chunk_id),
+                FOREIGN KEY (source_id, document_id)
+                    REFERENCES ingestion_documents(source_id, document_id)
+                    ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ingestion_docs_status
+                ON ingestion_documents(status);
+
+            PRAGMA user_version = 2;
+        ";
+        cmd.ExecuteNonQuery();
     }
 
     private void CreateSchemaAndMetadata()
@@ -539,6 +577,30 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                 CREATE VIRTUAL TABLE vec_chunks USING vec0(
                     embedding float[{_dimensions}] distance_metric=cosine
                 );
+
+                CREATE TABLE IF NOT EXISTS ingestion_documents (
+                    source_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    metadata_hash TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    last_successful_ingestion TEXT NULL,
+                    PRIMARY KEY (source_id, document_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS ingestion_document_chunks (
+                    source_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL,
+                    chunk_id TEXT NOT NULL,
+                    PRIMARY KEY (source_id, document_id, chunk_id),
+                    FOREIGN KEY (source_id, document_id)
+                        REFERENCES ingestion_documents(source_id, document_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_ingestion_docs_status
+                    ON ingestion_documents(status);
             ";
             createCmd.ExecuteNonQuery();
         }
@@ -572,9 +634,9 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
             checkCmd.CommandText = @"
                 SELECT COUNT(*) FROM sqlite_master 
                 WHERE type IN ('table', 'shadow') 
-                  AND name IN ('chunks', 'pigmentor_metadata', 'vec_chunks');";
+                  AND name IN ('chunks', 'pigmentor_metadata', 'vec_chunks', 'ingestion_documents', 'ingestion_document_chunks');";
             var count = Convert.ToInt64(checkCmd.ExecuteScalar(), CultureInfo.InvariantCulture);
-            if (count < 3)
+            if (count < 5)
             {
                 throw new InvalidOperationException("Incompatible SQLite schema: required Pigmentor tables are missing.");
             }

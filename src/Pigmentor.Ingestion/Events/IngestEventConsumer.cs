@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Pigmentor.Core.Abstractions;
 
 namespace Pigmentor.Ingestion.Events;
 
@@ -36,8 +37,9 @@ public sealed partial class IngestEventConsumer : BackgroundService
     private readonly Func<string, CancellationToken, Task> _invalidateCache;
     private readonly string? _tenantId;
     private readonly ILogger<IngestEventConsumer> _logger;
+    private readonly IIngestionStateStore? _stateStore;
 
-    // documentId -> highest version processed. The ordering + idempotency guard.
+    // documentId -> highest version processed. Serves as in-process fast cache.
     private readonly ConcurrentDictionary<string, long> _lastVersion = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -61,6 +63,20 @@ public sealed partial class IngestEventConsumer : BackgroundService
         Func<string, CancellationToken, Task> invalidateCache,
         ILogger<IngestEventConsumer> logger,
         string? tenantId = null)
+        : this(feed, reingest, invalidateCache, logger, tenantId, null)
+    {
+    }
+
+    /// <summary>
+    /// Create the consumer with persistent ingestion state store.
+    /// </summary>
+    public IngestEventConsumer(
+        IChangeFeed feed,
+        IDocumentReingestService reingest,
+        Func<string, CancellationToken, Task> invalidateCache,
+        ILogger<IngestEventConsumer> logger,
+        string? tenantId,
+        IIngestionStateStore? stateStore)
     {
         ArgumentNullException.ThrowIfNull(feed);
         ArgumentNullException.ThrowIfNull(reingest);
@@ -71,6 +87,7 @@ public sealed partial class IngestEventConsumer : BackgroundService
         _invalidateCache = invalidateCache;
         _logger = logger;
         _tenantId = tenantId;
+        _stateStore = stateStore;
     }
 
     /// <inheritdoc />
@@ -99,10 +116,19 @@ public sealed partial class IngestEventConsumer : BackgroundService
             return false;
         }
 
-        // Version guard (ordering + idempotency): skip an event at or below the last
-        // version we processed for this document. A duplicate (equal version) and an
-        // out-of-order older event both fall here.
+        // Version guard (ordering + idempotency): check process cache first, then persistent state if available.
         var last = _lastVersion.GetValueOrDefault(changed.DocumentId, long.MinValue);
+        if (_stateStore != null && last == long.MinValue)
+        {
+            var sourceId = _tenantId ?? "default";
+            var persistedState = await _stateStore.GetAsync(changed.DocumentId, sourceId, cancellationToken).ConfigureAwait(false);
+            if (persistedState != null && persistedState.Status == IngestionStatus.Succeeded)
+            {
+                last = persistedState.Version;
+                _lastVersion[changed.DocumentId] = last;
+            }
+        }
+
         if (changed.Version <= last)
         {
             Log.SkippedStale(_logger, changed.DocumentId, changed.Version, last);

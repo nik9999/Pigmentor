@@ -41,26 +41,32 @@ public sealed class DocumentReingestService : IDocumentReingestService
     private readonly Func<string, CancellationToken, Task<IReadOnlyList<DocumentChunk>>> _rechunk;
     private readonly IEmbeddingService _embedder;
     private readonly IVectorStore _store;
+    private readonly IIngestionStateStore? _stateStore;
 
-    // documentId -> the chunk ids last written for it. Lets the service delete the
-    // exact prior set (including orphans the new version no longer produces).
+    // documentId -> the chunk ids last written for it. Serves as in-memory cache
+    // and fallback when IIngestionStateStore is not configured.
     private readonly ConcurrentDictionary<string, string[]> _lastIndexed =
         new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Create the re-ingest service.
+    /// Create the re-ingest service with vector store and embedding service.
     /// </summary>
-    /// <param name="rechunk">
-    /// Produces the document's current desired chunks (read source, chunk it). In
-    /// tests this is a stub returning a fixed set; in production it wraps the load +
-    /// chunker path (<c>Pigmentor.Ingestion.Chunking.IChunker</c>).
-    /// </param>
-    /// <param name="embedder">The current embedding service.</param>
-    /// <param name="store">The vector store to delete from and upsert into.</param>
     public DocumentReingestService(
         Func<string, CancellationToken, Task<IReadOnlyList<DocumentChunk>>> rechunk,
         IEmbeddingService embedder,
         IVectorStore store)
+        : this(rechunk, embedder, store, null)
+    {
+    }
+
+    /// <summary>
+    /// Create the re-ingest service with vector store, embedding service, and persistent ingestion state store.
+    /// </summary>
+    public DocumentReingestService(
+        Func<string, CancellationToken, Task<IReadOnlyList<DocumentChunk>>> rechunk,
+        IEmbeddingService embedder,
+        IVectorStore store,
+        IIngestionStateStore? stateStore)
     {
         ArgumentNullException.ThrowIfNull(rechunk);
         ArgumentNullException.ThrowIfNull(embedder);
@@ -68,6 +74,7 @@ public sealed class DocumentReingestService : IDocumentReingestService
         _rechunk = rechunk;
         _embedder = embedder;
         _store = store;
+        _stateStore = stateStore;
     }
 
     /// <summary>
@@ -91,12 +98,32 @@ public sealed class DocumentReingestService : IDocumentReingestService
         //    new set may have a different count than what is in the index today.
         var newChunks = await _rechunk(documentId, cancellationToken).ConfigureAwait(false);
 
-        // 2. Delete ALL prior chunks for the document. This is the orphan-removal
-        //    step: any old chunk id not produced by the new chunking would otherwise
-        //    linger and keep being retrieved. We delete the union of (last-indexed
-        //    set) and (new set) ids so a shrink leaves nothing behind.
-        var oldIds = _lastIndexed.TryGetValue(documentId, out var prior) ? prior : [];
-        var toDelete = new HashSet<string>(oldIds, StringComparer.Ordinal);
+        // 2. Prepare new embeddings in memory BEFORE mutating vector store (recoverable boundary).
+        var embedded = new List<EmbeddedChunk>(newChunks.Count);
+        foreach (var chunk in newChunks)
+        {
+            embedded.Add(await _embedder.EmbedAsync(chunk, cancellationToken).ConfigureAwait(false));
+        }
+
+        // 3. Resolve prior chunk IDs: query persistent store first, then fallback to in-memory registry.
+        IReadOnlyList<string> prior = [];
+        IngestionDocumentState? priorState = null;
+        if (_stateStore != null)
+        {
+            priorState = await _stateStore.GetAsync(documentId, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (priorState != null)
+            {
+                prior = priorState.ChunkIds;
+            }
+        }
+
+        if (prior.Count == 0 && _lastIndexed.TryGetValue(documentId, out var cachedPrior))
+        {
+            prior = cachedPrior;
+        }
+
+        // Delete ALL prior chunks and new chunk IDs to prevent duplicates/orphans.
+        var toDelete = new HashSet<string>(prior, StringComparer.Ordinal);
         foreach (var chunk in newChunks)
         {
             toDelete.Add(chunk.ChunkId);
@@ -107,19 +134,32 @@ public sealed class DocumentReingestService : IDocumentReingestService
             await _store.DeleteAsync(toDelete, cancellationToken).ConfigureAwait(false);
         }
 
-        // 3. Re-embed and insert the fresh set.
-        var embedded = new List<EmbeddedChunk>(newChunks.Count);
-        foreach (var chunk in newChunks)
-        {
-            embedded.Add(await _embedder.EmbedAsync(chunk, cancellationToken).ConfigureAwait(false));
-        }
-
+        // 4. Insert the fresh set into the vector store.
         if (embedded.Count > 0)
         {
             await _store.UpsertAsync(embedded, cancellationToken).ConfigureAwait(false);
         }
 
-        // 4. Remember the new id set for the next re-ingest.
-        _lastIndexed[documentId] = newChunks.Select(c => c.ChunkId).ToArray();
+        var newChunkIds = newChunks.Select(c => c.ChunkId).ToArray();
+
+        // 5. Commit persistent state if state store is configured.
+        if (_stateStore != null)
+        {
+            var nextVersion = (priorState?.Version ?? 0) + 1;
+            var updatedState = new IngestionDocumentState(
+                SourceId: priorState?.SourceId ?? "default",
+                DocumentId: documentId,
+                ContentHash: priorState?.ContentHash ?? string.Empty,
+                MetadataHash: priorState?.MetadataHash ?? string.Empty,
+                Version: nextVersion,
+                Status: IngestionStatus.Succeeded,
+                LastSuccessfulIngestion: DateTimeOffset.UtcNow,
+                ChunkIds: newChunkIds);
+
+            await _stateStore.SaveAsync(updatedState, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        // 6. Remember the new id set in the in-memory cache for subsequent re-ingests.
+        _lastIndexed[documentId] = newChunkIds;
     }
 }
