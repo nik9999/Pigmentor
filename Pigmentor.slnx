@@ -4,6 +4,7 @@
     <Project Path="src/Pigmentor.Core/Pigmentor.Core.csproj" />
     <Project Path="src/Pigmentor.Evaluation/Pigmentor.Evaluation.csproj" />
     <Project Path="src/Pigmentor.Generation/Pigmentor.Generation.csproj" />
+    <Project Path="src/Pigmentor.Hosting/Pigmentor.Hosting.csproj" />
     <Project Path="src/Pigmentor.Ingestion/Pigmentor.Ingestion.csproj" />
     <Project Path="src/Pigmentor.Retrieval/Pigmentor.Retrieval.csproj" />
     <Project Path="src/Pigmentor.VectorStore.SqliteVec/Pigmentor.VectorStore.SqliteVec.csproj" />

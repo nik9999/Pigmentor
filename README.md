@@ -5,12 +5,14 @@ with a project-specific `Pigmentor.*` namespace.
 
 ## First slice
 
-- `Pigmentor.Core` contains the domain and ports.
+- `Pigmentor.Core` contains domain primitives, ports, abstractions and configuration contracts.
 - `Pigmentor.Ingestion` contains document loading, chunking and embedding pipelines.
 - `Pigmentor.Retrieval` contains dense, sparse, hybrid, graph and vectorless retrieval.
 - `Pigmentor.Generation` contains the retrieve-augment-generate pipeline.
+- `Pigmentor.GigaChat` contains the Sber GigaChat REST adapter and Microsoft.Extensions.AI implementations.
+- `Pigmentor.Hosting` contains the composition root, `PigmentorBuilder`, and top-level DI registrations (`UseOllama`, `UseGigaChat`, `UseConfiguredProviders`).
 - `Pigmentor.VectorStore.SqliteVec` persists chunks and embeddings in SQLite and exposes an explicit sqlite-vec loading seam.
-- `Pigmentor.Tests` contains offline tests.
+- `Pigmentor.Tests` contains unit and integration tests.
 
 The default provider is local Ollama (`nomic-embed-text` and `llama3.2`).
 The sqlite-vec native extension is intentionally loaded by the host through
@@ -34,6 +36,20 @@ Chat and embeddings are configured independently:
     }
   }
 }
+```
+
+```csharp
+// Programmatic provider configuration:
+services.AddPigmentor()
+    .UseOllama(new Uri("http://localhost:11434"), chatModel: "llama3.2", embeddingModel: "nomic-embed-text");
+
+// Or with Sber GigaChat:
+services.AddPigmentor()
+    .UseGigaChat(authorizationKey: "...", chatModel: "GigaChat-2-Lite");
+
+// Or dynamically wired from configuration (Pigmentor:Llm and Pigmentor:Embedding sections):
+services.AddPigmentor(configuration)
+    .UseConfiguredProviders();
 ```
 
 Use `Embedding:Provider = Onnx` for a local BGE-M3 backend. Set both
