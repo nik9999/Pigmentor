@@ -59,12 +59,7 @@ public sealed class LlmSectionRouter : IRetriever
         var nodes = _index.AllNodes().ToList();
         var titles = string.Join("\n", nodes.Select((n, i) => $"{i}: {n.Path}"));
 
-        var prompt =
-            $"You are routing a question to the most relevant section(s) of a structured document. " +
-            $"Reply with a comma-separated list of up to {request.TopK} integer indices, in order of relevance. " +
-            $"No prose.\n\n" +
-            $"Sections:\n{titles}\n\n" +
-            $"Question: {request.Query}";
+        var prompt = BuildPrompt(titles, request.Query, request.TopK);
 
         var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         var raw = response.Text ?? string.Empty;
@@ -89,4 +84,11 @@ public sealed class LlmSectionRouter : IRetriever
                 return new RetrievalResult(chunk, 1.0 / (rank + 1));
             })];
     }
+
+    internal static string BuildPrompt(string titles, string query, int topK) =>
+        $"Определи наиболее релевантные разделы структурированного документа для ответа на вопрос. " +
+        $"Ответь списком целочисленных индексов через запятую (до {topK} шт.) в порядке убывания релевантности. " +
+        $"Не добавляй пояснений и текста.\n\n" +
+        $"Разделы:\n{titles}\n\n" +
+        $"Вопрос: {query}";
 }

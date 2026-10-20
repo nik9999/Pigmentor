@@ -17,6 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Pigmentor.Core\Pigmentor.Core.csproj" />
     <ProjectReference Include="..\Pigmentor.Generation\Pigmentor.Generation.csproj" />
+    <InternalsVisibleTo Include="Pigmentor.Tests" />
   </ItemGroup>
 
 </Project>

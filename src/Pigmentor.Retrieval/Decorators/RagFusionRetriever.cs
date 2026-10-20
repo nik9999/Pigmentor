@@ -17,9 +17,10 @@ public sealed class RagFusionRetriever : IRetriever
     private readonly RrfMerger _merger;
     public int QueryVariants { get; }
 
-    private const string Prompt =
-        "Generate {0} distinct alternative phrasings of the following user question. " +
-        "Output one per line, no numbering, no preamble.\n\nQuestion: {1}";
+    internal const string Prompt =
+        "Сформулируй {0} различных альтернативных вариантов следующего вопроса пользователя на русском языке. " +
+        "Сохраняй исходные технические термины, названия протоколов, регистров, параметров, стандартов и моделей без перевода. " +
+        "Выводи строго по одному варианту на строку, без нумерации, списков и вводных фраз.\n\nВопрос: {1}";
 
     public RagFusionRetriever(IRetriever inner, IChatClient chat, int queryVariants = 3, RrfMerger? merger = null)
     {

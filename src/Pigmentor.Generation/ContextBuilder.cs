@@ -142,7 +142,7 @@ public sealed class ContextBuilder : IContextBuilder
             ? chunk.Metadata.Title
             : chunk.DocumentId;
 
-        return $"[{sourceId}] Title: {title} | Document: {chunk.DocumentId}";
+        return $"[{sourceId}] Название: {title} | Документ: {chunk.DocumentId}";
     }
 
     private DocumentChunk TruncateChunk(DocumentChunk chunk, string sourceId, int maxBlockTokens)

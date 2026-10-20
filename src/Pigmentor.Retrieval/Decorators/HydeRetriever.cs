@@ -15,11 +15,12 @@ public sealed class HydeRetriever : IRetriever
     private readonly IRetriever _inner;
     private readonly IChatClient _chat;
 
-    private const string Prompt =
-        "Write a short, hypothetical 2-3 sentence answer to the following question. " +
-        "It does NOT need to be factual — it just needs to look like the kind of passage " +
-        "we expect to find in a knowledge base. Reply with only the passage, no preamble.\n\n" +
-        "Question: {0}";
+    internal const string Prompt =
+        "Напиши краткий гипотетический ответ (2-3 предложения) на следующий вопрос на русском языке. " +
+        "Ответ не обязательно должен быть фактически точным — он должен выглядеть как фрагмент из базы знаний. " +
+        "Сохраняй исходные технические термины, названия протоколов, регистров, параметров, стандартов и идентификаторов без перевода. " +
+        "Ответь только текстом фрагмента, без вводных фраз и пояснений.\n\n" +
+        "Вопрос: {0}";
 
     public HydeRetriever(IRetriever inner, IChatClient chat)
     {

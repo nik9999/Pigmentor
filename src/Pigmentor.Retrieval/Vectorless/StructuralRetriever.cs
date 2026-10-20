@@ -194,11 +194,7 @@ public sealed class StructuralRetriever : IRetriever
 
     private async Task<string?> ExtractIdentifierAsync(string query, CancellationToken cancellationToken)
     {
-        var prompt =
-            "Extract a structural identifier (e.g. \"GDPR/Art17\", \"Art17\", \"§17\") if the user named " +
-            "one; otherwise summarize the topic. Reply as JSON: " +
-            "{ \"explicitId\": string|null, \"topic\": string|null }.\n\n" +
-            $"Question: {query}";
+        var prompt = BuildPrompt(query);
 
         try
         {
@@ -257,4 +253,10 @@ public sealed class StructuralRetriever : IRetriever
         }
         return results;
     }
+
+    internal static string BuildPrompt(string query) =>
+        "Извлеки структурный идентификатор (например, \"GDPR/Art17\", \"Art17\", \"§17\"), если пользователь его указал; " +
+        "иначе опиши тему запроса. Верни ответ в формате JSON: " +
+        "{ \"explicitId\": string|null, \"topic\": string|null }.\n\n" +
+        $"Вопрос: {query}";
 }

@@ -17,20 +17,21 @@ public sealed class EntityExtractor
 {
     private readonly IChatClient _chat;
 
-    private const string Prompt =
+    internal const string Prompt =
         """
-        Extract entities and relationships from the following passage. Return ONLY a JSON object:
+        Извлеки сущности и связи из следующего фрагмента текста. Верни ТОЛЬКО JSON-объект:
 
           {
             "entities":  [ { "id": "...", "type": "...", "name": "...", "properties": {} }, ... ],
             "relations": [ { "from": "...", "to": "...", "type": "...", "properties": {} }, ... ]
           }
 
-        Use these entity types when applicable: Employee, Department, Office, Document, Product, Client, Contract.
-        Use these relation types when applicable: WORKS_IN, REPORTS_TO, AUTHORED, GOVERNS, REFERENCES, DEPENDS_ON, SIGNED_BY.
-        Use kebab-case stable ids (e.g. "acme-corporation", "vacation-policy-2026").
+        Используй следующие типы сущностей, если применимо: Employee, Department, Office, Document, Product, Client, Contract.
+        Используй следующие типы связей, если применимо: WORKS_IN, REPORTS_TO, AUTHORED, GOVERNS, REFERENCES, DEPENDS_ON, SIGNED_BY.
+        Используй стабильные идентификаторы в kebab-case (например, "acme-corporation", "vacation-policy-2026").
+        Сохраняй исходные технические термины, протоколы, стандарты, модели и параметры без перевода.
 
-        Passage:
+        Фрагмент текста:
         {0}
         """;
 

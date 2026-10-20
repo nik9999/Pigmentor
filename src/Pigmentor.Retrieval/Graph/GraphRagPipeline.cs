@@ -123,8 +123,9 @@ public sealed class GraphRagPipeline
             var memberLine = string.Join(", ",
                 members.Select(m => $"{m.Type}: {m.Name}"));
             var prompt =
-                "Summarize this community of related entities in two or three sentences.\n\n" +
-                "Members: " + memberLine;
+                "Сформулируй краткую сводку (2-3 предложения) для этого сообщества связанных сущностей на русском языке. " +
+                "Сохраняй исходные технические термины и идентификаторы без перевода.\n\n" +
+                "Участники: " + memberLine;
             var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
             summaries.Add(new CommunitySummary(
                 CommunityId: $"community-{i}",

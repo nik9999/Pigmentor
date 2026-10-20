@@ -70,11 +70,13 @@ public sealed class CragRetriever : IRetriever
 
     private enum Grade { Correct, Ambiguous, Incorrect }
 
+    internal static string BuildGradePrompt(string query, string passage) =>
+        $"Оцени, насколько фрагмент текста отвечает на вопрос. Ответь РОВНО одним словом: " +
+        $"CORRECT, AMBIGUOUS или INCORRECT.\n\nВопрос: {query}\n\nФрагмент текста: {passage}";
+
     private async Task<Grade> GradeAsync(string query, string passage, CancellationToken cancellationToken)
     {
-        var prompt =
-            $"Grade how well the passage answers the question. Reply with EXACTLY one token: " +
-            $"CORRECT, AMBIGUOUS, or INCORRECT.\n\nQuestion: {query}\n\nPassage: {passage}";
+        var prompt = BuildGradePrompt(query, passage);
         var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         var text = (response.Text ?? "AMBIGUOUS").Trim().ToUpperInvariant();
         if (text.StartsWith("CORRECT", StringComparison.Ordinal))

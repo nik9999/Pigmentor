@@ -19,12 +19,12 @@ public sealed class StepBackRetriever : IRetriever
     private readonly IChatClient _chat;
     private readonly RrfMerger _merger;
 
-    private const string Prompt =
-        "You are an expert at world knowledge. Your task is to step back and " +
-        "paraphrase the question into ONE more generic step-back question that " +
-        "is easier to answer because it asks about broader concepts or principles. " +
-        "Reply with only the step-back question, no preamble.\n\n" +
-        "Question: {0}";
+    internal const string Prompt =
+        "Сформулируй ОДИН более общий концептуальный вопрос (step-back вопрос) к следующему вопросу на русском языке, " +
+        "охватывающий базовые принципы и концепции предметной области. " +
+        "Сохраняй исходные технические термины, названия протоколов, стандартов, моделей и ключевые сущности без перевода. " +
+        "Ответь только текстом вопроса, без вводных слов и пояснений.\n\n" +
+        "Вопрос: {0}";
 
     public StepBackRetriever(IRetriever inner, IChatClient chat, RrfMerger? merger = null)
     {

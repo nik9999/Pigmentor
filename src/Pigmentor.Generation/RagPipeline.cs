@@ -233,14 +233,34 @@ public sealed class RagPipeline : IRagPipeline
         // 4. Context builder enforces token budget, accounting for prompt instructions, delimiters, and question overhead (§3, §4, §5)
         var basePrompt = RagPromptBuilder.BuildPrompt(request.Question, RagContext.Empty);
         var promptOverheadTokens = _tokenCounter.CountTokens(basePrompt);
+        if (promptOverheadTokens > _settings.Budget.MaxInputTokens)
+        {
+            throw new InvalidOperationException(
+                $"The question and prompt instructions consume {promptOverheadTokens} tokens, which exceeds the maximum input budget limit of {_settings.Budget.MaxInputTokens} tokens (MaxTotalTokens: {_settings.Budget.MaxTotalTokens}, ReservedOutputTokens: {_settings.Budget.ReservedOutputTokens}).");
+        }
+
         var contextAllowance = _settings.Budget.ComputeAvailableContextTokens(promptOverheadTokens);
         var ragContext = _contextBuilder.BuildContext(rerankedCandidates, contextAllowance);
 
         // 5. Prompt assembly requiring explicit [S1], [S2] references and data boundary defense (§8, §9, §36, §37)
         var prompt = RagPromptBuilder.BuildPrompt(request.Question, ragContext);
-
-        // 6. Real prompt token counting for diagnostics (§16)
         var promptTokenCount = _tokenCounter.CountTokens(prompt);
+
+        // 6. Strict runtime invariant: PromptTokenCount <= MaxInputTokens (§10, §11, §12, §13)
+        if (promptTokenCount > _settings.Budget.MaxInputTokens && ragContext.Sources.Count > 0)
+        {
+            var remainingSources = ragContext.Sources.ToList();
+            while (remainingSources.Count > 0 && promptTokenCount > _settings.Budget.MaxInputTokens)
+            {
+                remainingSources.RemoveAt(remainingSources.Count - 1);
+                ragContext = remainingSources.Count > 0
+                    ? _contextBuilder.BuildContext(remainingSources, contextAllowance)
+                    : RagContext.Empty;
+
+                prompt = RagPromptBuilder.BuildPrompt(request.Question, ragContext);
+                promptTokenCount = _tokenCounter.CountTokens(prompt);
+            }
+        }
 
         return new PreparedExecution(
             CandidatePool: candidatePool,

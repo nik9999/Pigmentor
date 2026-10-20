@@ -50,10 +50,7 @@ public sealed class GenerationEvaluator
         foreach (var sentence in sentences)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var prompt =
-                $"Grade the claim against the context. Reply EXACTLY one token: " +
-                $"SUPPORTED, PARTIALLY_SUPPORTED, or NOT_SUPPORTED.\n\n" +
-                $"Context:\n{contextBlock}\n\nClaim: {sentence}";
+            var prompt = BuildPrompt(contextBlock, sentence);
             var response = await _judge.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
             var verdict = (response.Text ?? "PARTIALLY_SUPPORTED").Trim().ToUpperInvariant();
             if (verdict.StartsWith("SUPPORTED", StringComparison.Ordinal))
@@ -84,4 +81,9 @@ public sealed class GenerationEvaluator
             .Split(['.', '!', '?'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(s => s.Length > 3)];
     }
+
+    internal static string BuildPrompt(string contextBlock, string sentence) =>
+        $"Оцени утверждение на основе контекста. Ответь РОВНО одним словом: " +
+        $"SUPPORTED, PARTIALLY_SUPPORTED или NOT_SUPPORTED.\n\n" +
+        $"Контекст:\n{contextBlock}\n\nУтверждение: {sentence}";
 }

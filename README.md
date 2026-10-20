@@ -56,7 +56,7 @@ converted ONNX graph and its compatible tokenizer bundle.
 
 ## RAG Pipeline Execution
 
-The generation pipeline (`IRagPipeline`) orchestrates retrieval with metadata filtering, reranking, token budgeting, prompt injection defense, generation, and citation mapping:
+The generation pipeline (`IRagPipeline`) orchestrates retrieval with metadata filtering, reranking, token budgeting, prompt injection defense, generation, and citation mapping. By default, Pigmentor v1 uses Russian instructions and preserves technical terms (`Modbus`, `RS-485`, registers, commands) verbatim:
 
 ```csharp
 // Fluent RAG configuration
@@ -69,11 +69,11 @@ services.AddPigmentor(configuration)
     });
 
 // Complete response
-var response = await pipeline.AskAsync(new RagRequest("What are the indexing guarantees?", topK: 5));
+var response = await pipeline.AskAsync(new RagRequest("Какие регистры Modbus поддерживаются?", topK: 5));
 Console.WriteLine(response.Answer);
 
 // Streaming response
-await foreach (var evt in pipeline.AskStreamingAsync(new RagRequest("Streaming question?")))
+await foreach (var evt in pipeline.AskStreamingAsync(new RagRequest("Покажи конфигурацию RS-485")))
 {
     if (evt is RagTextDelta delta) Console.Write(delta.Text);
     else if (evt is RagCompleted completed) Console.WriteLine($"\nCitations: {completed.Response.Citations.Count}");

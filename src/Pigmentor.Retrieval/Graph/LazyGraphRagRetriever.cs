@@ -110,9 +110,10 @@ public sealed class LazyGraphRagRetriever : IRetriever
                 (e.Properties.Count == 0 ? "" : " (" + string.Join("; ", e.Properties.Select(p => $"{p.Key}={p.Value}")) + ")")));
 
         var prompt =
-            $"Given the following subgraph, summarize it as a single concise paragraph " +
-            $"that would help answer the question. Reply with ONLY the summary.\n\n" +
-            $"Question: {request.Query}\n\nSubgraph:\n{subgraphText}";
+            $"На основе следующего подграфа составь один краткий абзац на русском языке, " +
+            $"содержащий ключевую информацию для ответа на вопрос. Сохраняй исходные технические термины и идентификаторы без перевода. " +
+            $"Ответь ТОЛЬКО текстом сводки, без вводных фраз.\n\n" +
+            $"Вопрос: {request.Query}\n\nПодграф:\n{subgraphText}";
 
         var response = await _chat.GetResponseAsync(prompt, cancellationToken: cancellationToken).ConfigureAwait(false);
         var summary = (response.Text ?? string.Empty).Trim();
