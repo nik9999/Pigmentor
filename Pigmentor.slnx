@@ -8,6 +8,8 @@
     <Project Path="src/Pigmentor.Ingestion/Pigmentor.Ingestion.csproj" />
     <Project Path="src/Pigmentor.Retrieval/Pigmentor.Retrieval.csproj" />
     <Project Path="src/Pigmentor.VectorStore.SqliteVec/Pigmentor.VectorStore.SqliteVec.csproj" />
+    <Project Path="src/Pigmentor.App/Pigmentor.App.csproj" />
+    <Project Path="src/Pigmentor.RAG.Cli/Pigmentor.RAG.Cli.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/Pigmentor.ChunkingLab/Pigmentor.ChunkingLab.csproj" />

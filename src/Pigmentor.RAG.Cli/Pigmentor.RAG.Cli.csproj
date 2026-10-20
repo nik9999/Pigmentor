@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>pigmentor</AssemblyName>
+    <RootNamespace>Pigmentor.RAG.Cli</RootNamespace>
+    <Description>Reference command-line interface for the Pigmentor RAG runtime.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Pigmentor.App\Pigmentor.App.csproj" />
+    <ProjectReference Include="..\Pigmentor.Core\Pigmentor.Core.csproj" />
+    <ProjectReference Include="..\Pigmentor.Hosting\Pigmentor.Hosting.csproj" />
+    <ProjectReference Include="..\Pigmentor.GigaChat\Pigmentor.GigaChat.csproj" />
+    <ProjectReference Include="..\Pigmentor.Ingestion\Pigmentor.Ingestion.csproj" />
+    <ProjectReference Include="..\Pigmentor.Retrieval\Pigmentor.Retrieval.csproj" />
+    <ProjectReference Include="..\Pigmentor.Generation\Pigmentor.Generation.csproj" />
+    <ProjectReference Include="..\Pigmentor.VectorStore.SqliteVec\Pigmentor.VectorStore.SqliteVec.csproj" />
+  </ItemGroup>
+
+</Project>
+
