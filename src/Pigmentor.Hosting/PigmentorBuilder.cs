@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Pigmentor.Core.Abstractions;
 using Pigmentor.Generation;
+using Pigmentor.Ingestion.DependencyInjection;
 
 namespace Pigmentor.Hosting;
 
@@ -37,6 +39,36 @@ public sealed class PigmentorBuilder
     {
         ArgumentNullException.ThrowIfNull(configure);
         Services.Configure(configure);
+        return this;
+    }
+
+    /// <summary>
+    /// Registers document extraction and normalization services for PDF, Word, Excel, and images.
+    /// </summary>
+    /// <param name="configureLimits">Optional delegate to customize extraction resource limits.</param>
+    /// <returns>This builder for chaining.</returns>
+    public PigmentorBuilder AddDocumentExtraction(Action<ExtractionLimits>? configureLimits = null)
+    {
+        Services.AddDocumentExtraction(configureLimits);
+        return this;
+    }
+
+    /// <summary>
+    /// Registers an OCR engine implementation for image and scanned PDF processing.
+    /// </summary>
+    public PigmentorBuilder UseOcrEngine<TOcrEngine>() where TOcrEngine : class, IOcrEngine
+    {
+        Services.AddSingleton<IOcrEngine, TOcrEngine>();
+        return this;
+    }
+
+    /// <summary>
+    /// Registers an OCR engine instance for image and scanned PDF processing.
+    /// </summary>
+    public PigmentorBuilder UseOcrEngine(IOcrEngine engine)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        Services.AddSingleton(engine);
         return this;
     }
 }

@@ -5,6 +5,8 @@ using Microsoft.Extensions.Options;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Configuration;
 using Pigmentor.Ingestion.Chunking;
+using Pigmentor.Ingestion.Extraction;
+using Pigmentor.Ingestion.Normalization;
 using Pigmentor.Ingestion.Services;
 
 namespace Pigmentor.Ingestion.DependencyInjection;
@@ -68,6 +70,30 @@ public static class ServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         services.AddSingleton<IDocumentIngestionService, DocumentIngestionService>();
+        return services;
+    }
+
+    /// <summary>
+    /// Registers document extraction and normalization services.
+    /// </summary>
+    public static IServiceCollection AddDocumentExtraction(
+        this IServiceCollection services,
+        Action<ExtractionLimits>? configureLimits = null)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        var limits = new ExtractionLimits();
+        configureLimits?.Invoke(limits);
+
+        services.AddSingleton(limits);
+        services.AddSingleton<IDocumentNormalizer, DocumentNormalizer>();
+        services.AddSingleton<IDocumentExtractor>(sp =>
+        {
+            var ocr = sp.GetService<IOcrEngine>();
+            var lim = sp.GetService<ExtractionLimits>() ?? limits;
+            return new DocumentExtractor(ocrEngine: ocr, limits: lim);
+        });
+
         return services;
     }
 }

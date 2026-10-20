@@ -71,6 +71,16 @@ public interface IDocumentIngestionService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Ingests a source file (.pdf, .docx, .xlsx, .txt, image) by extracting, normalizing, and chunking it.
+    /// </summary>
+    Task<IngestionResult> IngestFileAsync(
+        string filePath,
+        DocumentMetadata? metadata = null,
+        string sourceId = "default",
+        long? explicitVersion = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Synchronizes a snapshot of source documents against the persistent index.
     /// Ingests new documents, replaces changed documents, skips unchanged documents,
     /// and deletes any previously indexed documents that are missing from the snapshot.

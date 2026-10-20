@@ -17,6 +17,8 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
     private readonly IVectorStore _vectorStore;
     private readonly IChunker _chunker;
     private readonly IEmbeddingService _embedder;
+    private readonly IDocumentExtractor? _documentExtractor;
+    private readonly IDocumentNormalizer? _documentNormalizer;
     private readonly ILogger<DocumentIngestionService>? _logger;
 
     public DocumentIngestionService(
@@ -24,13 +26,54 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         IVectorStore vectorStore,
         IChunker chunker,
         IEmbeddingService embedder,
+        IDocumentExtractor? documentExtractor = null,
+        IDocumentNormalizer? documentNormalizer = null,
         ILogger<DocumentIngestionService>? logger = null)
     {
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _vectorStore = vectorStore ?? throw new ArgumentNullException(nameof(vectorStore));
         _chunker = chunker ?? throw new ArgumentNullException(nameof(chunker));
         _embedder = embedder ?? throw new ArgumentNullException(nameof(embedder));
+        _documentExtractor = documentExtractor;
+        _documentNormalizer = documentNormalizer;
         _logger = logger;
+    }
+
+    public DocumentIngestionService(
+        IIngestionStateStore stateStore,
+        IVectorStore vectorStore,
+        IChunker chunker,
+        IEmbeddingService embedder,
+        ILogger<DocumentIngestionService>? logger)
+        : this(stateStore, vectorStore, chunker, embedder, null, null, logger)
+    {
+    }
+
+    /// <inheritdoc />
+    public async Task<IngestionResult> IngestFileAsync(
+        string filePath,
+        DocumentMetadata? metadata = null,
+        string sourceId = "default",
+        long? explicitVersion = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+
+        if (_documentExtractor == null || _documentNormalizer == null)
+        {
+            throw new InvalidOperationException(
+                "Document extractor or normalizer is not configured on DocumentIngestionService. Register them via AddDocumentExtraction().");
+        }
+
+        var extracted = await _documentExtractor.ExtractFileAsync(filePath, metadata, cancellationToken).ConfigureAwait(false);
+        var normalized = await _documentNormalizer.NormalizeAsync(extracted, cancellationToken).ConfigureAwait(false);
+
+        var doc = new Document(
+            Metadata: normalized.Metadata,
+            Content: normalized.ToFullContent(),
+            SourcePath: filePath);
+
+        return await IngestAsync(doc, sourceId, explicitVersion, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
