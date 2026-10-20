@@ -17,6 +17,9 @@ public sealed record ExtractionLimits
     /// <summary>Maximum number of rows extracted per table (default: 10,000).</summary>
     public int MaxTableRows { get; init; } = 10_000;
 
+    /// <summary>Maximum characters extracted for a figure's surrounding prose context (default: 500).</summary>
+    public int MaxFigureContextChars { get; init; } = 500;
+
     /// <summary>Default system-wide limits.</summary>
     public static ExtractionLimits Default { get; } = new();
 }

@@ -17,6 +17,7 @@ using Pigmentor.Ingestion.Normalization;
 using Pigmentor.Ingestion.Normalization.Rules;
 using Pigmentor.Ingestion.Quality;
 using Pigmentor.Ingestion.Services;
+using Pigmentor.Tests.Fixtures;
 using Pigmentor.VectorStore.SqliteVec;
 using UglyToad.PdfPig.Core;
 using UglyToad.PdfPig.Fonts.Standard14Fonts;
@@ -61,13 +62,15 @@ public sealed class ExtractionAndNormalizationTests : IDisposable
     {
         public string DefaultText { get; set; }
         public double DefaultConfidence { get; set; }
+        public IReadOnlyList<OcrLine>? Lines { get; set; }
         public TimeSpan Delay { get; set; } = TimeSpan.Zero;
         public int CallCount { get; private set; }
 
-        public FakeOcrEngine(string defaultText = "", double defaultConfidence = 0.95)
+        public FakeOcrEngine(string defaultText = "", double defaultConfidence = 0.95, IReadOnlyList<OcrLine>? lines = null)
         {
             DefaultText = defaultText;
             DefaultConfidence = defaultConfidence;
+            Lines = lines;
         }
 
         public async Task<OcrResult> RecognizeAsync(Stream imageStream, CancellationToken cancellationToken = default)
@@ -78,7 +81,7 @@ public sealed class ExtractionAndNormalizationTests : IDisposable
             {
                 await Task.Delay(Delay, cancellationToken);
             }
-            return new OcrResult(DefaultText, DefaultConfidence);
+            return new OcrResult(DefaultText, DefaultConfidence, Lines: Lines);
         }
     }
 
@@ -953,6 +956,394 @@ public sealed class ExtractionAndNormalizationTests : IDisposable
                 yield return await EmbedAsync(chunk, cancellationToken);
             }
         }
+    }
+
+    #endregion
+
+    #region Hardening v1 Tests - PDF Figures, Scanned Tables, and Normalization Lifecycle
+
+    [Fact]
+    public async Task PdfExtractor_FigureReceivesBoundedSurroundingContext_AndPreservesTokens()
+    {
+        var pdfBytes = TestPdfFixtures.CreatePdfFigurePdf();
+        var fakeOcr = new FakeOcrEngine("A\nB\nGND\n120 Ω\nRS-485", 0.98);
+        var extractor = new PdfFileExtractor(fakeOcr);
+        using var ms = new MemoryStream(pdfBytes);
+        var meta = CreateMetadata("pdf-fig", "figure_test.pdf");
+
+        var doc = await extractor.ExtractAsync(ms, "figure_test.pdf", meta);
+
+        var figure = Assert.Single(doc.Blocks.OfType<FigureBlock>());
+        Assert.Equal("Рисунок 1", figure.FigureId);
+        Assert.Contains("Figure 12 - Modbus RTU Wiring Schematic", figure.Caption);
+        Assert.Contains("Connection of RS-485 interface uses a two-wire line", figure.SurroundingContext);
+        Assert.Contains("Install a 120 Ohm termination resistor", figure.SurroundingContext);
+        Assert.DoesNotContain("\n12", figure.SurroundingContext);
+        Assert.False(figure.SurroundingContext.EndsWith(" 12", StringComparison.Ordinal));
+
+        var searchable = figure.Text;
+        Assert.Contains("Контекст:", searchable);
+        Assert.Contains("Текст на рисунке:", searchable);
+        Assert.Contains("RS-485", searchable);
+        Assert.Contains("Modbus RTU", searchable);
+        Assert.Contains("120 Ω", searchable);
+        Assert.Contains("A", searchable);
+        Assert.Contains("B", searchable);
+        Assert.Contains("GND", searchable);
+    }
+
+    [Fact]
+    public async Task PdfExtractor_LowQualityFigureOcr_RejectedWithoutPollutingSearchableText()
+    {
+        var pdfBytes = TestPdfFixtures.CreatePdfFigurePdf();
+        var fakeOcr = new FakeOcrEngine("###@@@$$$%%%&&&!!!???~~~^^^", 0.20);
+        var extractor = new PdfFileExtractor(fakeOcr);
+        using var ms = new MemoryStream(pdfBytes);
+        var meta = CreateMetadata("pdf-fig-garbage", "garbage_figure.pdf");
+
+        var doc = await extractor.ExtractAsync(ms, "garbage_figure.pdf", meta);
+
+        var figure = Assert.Single(doc.Blocks.OfType<FigureBlock>());
+        Assert.Empty(figure.OcrText);
+        Assert.NotEmpty(figure.Caption);
+        Assert.NotEmpty(figure.SurroundingContext);
+        Assert.DoesNotContain("Текст на рисунке:", figure.Text);
+        Assert.DoesNotContain("###@@@", figure.Text);
+    }
+
+    [Fact]
+    public void OcrTableDetector_DetectsStructuredModbusTable()
+    {
+        var detector = new OcrTableDetector();
+        const string ocrText = """
+            Address | Name | Type | Access
+            40001 | Temperature | INT16 | RO
+            40002 | Pressure | UINT16 | RO
+            """;
+
+        var ocrResult = new OcrResult(ocrText, 0.95);
+        var detected = detector.TryDetectTable(ocrResult, "doc-1", 1, "Modbus Table", out var table);
+
+        Assert.True(detected);
+        Assert.NotNull(table);
+        Assert.Equal(4, table.Columns.Count);
+        Assert.Equal(["Address", "Name", "Type", "Access"], table.Columns);
+        Assert.Equal(2, table.Rows.Count);
+
+        var row1 = table.Rows[0];
+        Assert.Equal("40001", row1.CellsByHeader["Address"]);
+        Assert.Equal("Temperature", row1.CellsByHeader["Name"]);
+        Assert.Equal("INT16", row1.CellsByHeader["Type"]);
+        Assert.Equal("RO", row1.CellsByHeader["Access"]);
+
+        var row2 = table.Rows[1];
+        Assert.Equal("40002", row2.CellsByHeader["Address"]);
+        Assert.Equal("Pressure", row2.CellsByHeader["Name"]);
+        Assert.Equal("UINT16", row2.CellsByHeader["Type"]);
+        Assert.Equal("RO", row2.CellsByHeader["Access"]);
+    }
+
+    [Fact]
+    public void OcrTableDetector_DetectsGenericTableFixture()
+    {
+        var detector = new OcrTableDetector();
+        const string ocrText = """
+            Parameter | Value | Unit
+            Voltage | 24 | V
+            Current | 4-20 | mA
+            """;
+
+        var ocrResult = new OcrResult(ocrText, 0.95);
+        var detected = detector.TryDetectTable(ocrResult, "doc-2", 1, "Generic Table", out var table);
+
+        Assert.True(detected);
+        Assert.NotNull(table);
+        Assert.Equal(3, table.Columns.Count);
+        Assert.Equal(["Parameter", "Value", "Unit"], table.Columns);
+        Assert.Equal(2, table.Rows.Count);
+
+        Assert.Equal("Voltage", table.Rows[0].CellsByHeader["Parameter"]);
+        Assert.Equal("24", table.Rows[0].CellsByHeader["Value"]);
+        Assert.Equal("V", table.Rows[0].CellsByHeader["Unit"]);
+
+        Assert.Equal("Current", table.Rows[1].CellsByHeader["Parameter"]);
+        Assert.Equal("4-20", table.Rows[1].CellsByHeader["Value"]);
+        Assert.Equal("mA", table.Rows[1].CellsByHeader["Unit"]);
+    }
+
+    [Fact]
+    public void OcrTableDetector_DetectsSpaceDelimitedTable()
+    {
+        var detector = new OcrTableDetector();
+        const string ocrText = "Address     Name          Type    Access\n40001       Temperature   INT16   RO\n40002       Pressure      UINT16  RO";
+
+        var ocrResult = new OcrResult(ocrText, 0.95);
+        var detected = detector.TryDetectTable(ocrResult, "doc-space", 1, "Space Table", out var table);
+
+        Assert.True(detected);
+        Assert.NotNull(table);
+        Assert.Equal(4, table.Columns.Count);
+        Assert.Equal(2, table.Rows.Count);
+        Assert.Equal("40001", table.Rows[0].CellsByHeader["Address"]);
+        Assert.Equal("Pressure", table.Rows[1].CellsByHeader["Name"]);
+    }
+
+    [Fact]
+    public void OcrTableDetector_OrdinaryProse_NotClassifiedAsTable()
+    {
+        var detector = new OcrTableDetector();
+        const string prose = """
+            Устройство поддерживает Modbus RTU.
+            Подключение выполняется через RS-485.
+            """;
+
+        var ocrResult = new OcrResult(prose, 0.95);
+        var detected = detector.TryDetectTable(ocrResult, "doc-prose", 1, "Prose", out var table);
+
+        Assert.False(detected);
+        Assert.Null(table);
+    }
+
+    [Fact]
+    public void OcrTableDetector_LowQualityOcr_NotClassifiedAsTable()
+    {
+        var detector = new OcrTableDetector();
+        const string garbage = "%%%%% $$$$$ ##### @@@@@";
+
+        var ocrResult = new OcrResult(garbage, 0.15);
+        var detected = detector.TryDetectTable(ocrResult, "doc-noise", 1, "Noise", out var table);
+
+        Assert.False(detected);
+        Assert.Null(table);
+    }
+
+    [Fact]
+    public async Task PdfExtractor_ScannedPageWithTable_RoutesToTableBlockWithoutDuplicateTextBlock()
+    {
+        var pdfBytes = TestPdfFixtures.CreateScannedTablePdf();
+        const string tableOcr = """
+            Address | Name | Type | Access
+            40001 | Temperature | INT16 | RO
+            40002 | Pressure | UINT16 | RO
+            """;
+
+        var fakeOcr = new FakeOcrEngine(tableOcr, 0.95);
+        var extractor = new PdfFileExtractor(fakeOcr);
+        using var ms = new MemoryStream(pdfBytes);
+        var meta = CreateMetadata("scanned-table-doc", "scanned_table.pdf");
+
+        var doc = await extractor.ExtractAsync(ms, "scanned_table.pdf", meta);
+
+        var tableBlock = Assert.Single(doc.Blocks.OfType<TableBlock>());
+        Assert.Empty(doc.Blocks.OfType<TextBlock>());
+        Assert.Equal(4, tableBlock.Table.Columns.Count);
+        Assert.Equal(2, tableBlock.Table.Rows.Count);
+        Assert.Equal("Temperature", tableBlock.Table.Rows[0].CellsByHeader["Name"]);
+    }
+
+    [Fact]
+    public async Task PdfExtractor_ScannedPageWithProse_RoutesToTextBlockWithoutTableBlock()
+    {
+        var pdfBytes = TestPdfFixtures.CreateScannedPagePdf();
+        const string proseOcr = "Устройство поддерживает Modbus RTU. Подключение выполняется через RS-485.";
+
+        var fakeOcr = new FakeOcrEngine(proseOcr, 0.95);
+        var extractor = new PdfFileExtractor(fakeOcr);
+        using var ms = new MemoryStream(pdfBytes);
+        var meta = CreateMetadata("scanned-prose-doc", "scanned_prose.pdf");
+
+        var doc = await extractor.ExtractAsync(ms, "scanned_prose.pdf", meta);
+
+        var textBlock = Assert.Single(doc.Blocks.OfType<TextBlock>());
+        Assert.Empty(doc.Blocks.OfType<TableBlock>());
+        Assert.Contains("Modbus RTU", textBlock.Text);
+    }
+
+    [Fact]
+    public async Task ImageExtractor_StandaloneImageTable_RoutesToTableBlockWithoutDuplicateTextBlock()
+    {
+        var pngBytes = TestPdfFixtures.MinimalValidPng;
+        const string tableOcr = """
+            Address | Name | Type | Access
+            40001 | Temperature | INT16 | RO
+            40002 | Pressure | UINT16 | RO
+            """;
+
+        var fakeOcr = new FakeOcrEngine(tableOcr, 0.95);
+        var extractor = new ImageFileExtractor(fakeOcr);
+        using var ms = new MemoryStream(pngBytes);
+        var meta = CreateMetadata("image-table-doc", "image_table.png");
+
+        var doc = await extractor.ExtractAsync(ms, "image_table.png", meta);
+
+        var tableBlock = Assert.Single(doc.Blocks.OfType<TableBlock>());
+        Assert.Empty(doc.Blocks.OfType<TextBlock>());
+        Assert.Equal(4, tableBlock.Table.Columns.Count);
+        Assert.Equal(2, tableBlock.Table.Rows.Count);
+        Assert.Equal("INT16", tableBlock.Table.Rows[0].CellsByHeader["Type"]);
+    }
+
+    [Fact]
+    public async Task PdfExtractor_EmbeddedImageTable_RoutesToTableBlockInsteadOfFigureBlock()
+    {
+        var pdfBytes = TestPdfFixtures.CreatePdfFigurePdf();
+        const string tableOcr = """
+            Address | Name | Type | Access
+            40001 | Temperature | INT16 | RO
+            40002 | Pressure | UINT16 | RO
+            """;
+
+        var fakeOcr = new FakeOcrEngine(tableOcr, 0.95);
+        var extractor = new PdfFileExtractor(fakeOcr);
+        using var ms = new MemoryStream(pdfBytes);
+        var meta = CreateMetadata("pdf-embedded-table", "embedded_table.pdf");
+
+        var doc = await extractor.ExtractAsync(ms, "embedded_table.pdf", meta);
+
+        var tableBlock = Assert.Single(doc.Blocks.OfType<TableBlock>());
+        Assert.Empty(doc.Blocks.OfType<FigureBlock>());
+        Assert.Equal(4, tableBlock.Table.Columns.Count);
+        Assert.Equal(2, tableBlock.Table.Rows.Count);
+    }
+
+    [Fact]
+    public async Task PdfExtractor_RealPdfTableFixture_ExtractsTableBlockWithAssociativeRows()
+    {
+        var pdfBytes = TestPdfFixtures.CreatePdfTablePdf();
+        var extractor = new PdfFileExtractor();
+        using var ms = new MemoryStream(pdfBytes);
+        var meta = CreateMetadata("pdf-real-table", "pdf_table.pdf");
+
+        var doc = await extractor.ExtractAsync(ms, "pdf_table.pdf", meta);
+
+        var tableBlock = Assert.Single(doc.Blocks.OfType<TableBlock>());
+        Assert.Equal(4, tableBlock.Table.Columns.Count);
+        Assert.Equal(3, tableBlock.Table.Rows.Count);
+
+        var row1 = tableBlock.Table.Rows[0];
+        Assert.Equal("40001", row1.CellsByHeader["Address"]);
+        Assert.Equal("Temperature", row1.CellsByHeader["Name"]);
+        Assert.Equal("INT16", row1.CellsByHeader["Type"]);
+        Assert.Equal("RO", row1.CellsByHeader["Access"]);
+
+        var row2 = tableBlock.Table.Rows[1];
+        Assert.Equal("40002", row2.CellsByHeader["Address"]);
+        Assert.Equal("Pressure", row2.CellsByHeader["Name"]);
+        Assert.Equal("UINT16", row2.CellsByHeader["Type"]);
+        Assert.Equal("RO", row2.CellsByHeader["Access"]);
+
+        var row3 = tableBlock.Table.Rows[2];
+        Assert.Equal("40003", row3.CellsByHeader["Address"]);
+        Assert.Equal("Humidity", row3.CellsByHeader["Name"]);
+        Assert.Equal("INT16", row3.CellsByHeader["Type"]);
+        Assert.Equal("RO", row3.CellsByHeader["Access"]);
+    }
+
+    [Fact]
+    public async Task PdfExtractor_MultiPagePdfTableFixture_MergesAcrossPagesAndFiltersRepeatedHeader()
+    {
+        var pdfBytes = TestPdfFixtures.CreateMultiPageTablePdf();
+        var extractor = new PdfFileExtractor();
+        using var ms = new MemoryStream(pdfBytes);
+        var meta = CreateMetadata("pdf-multipage-real", "multipage_table.pdf");
+
+        var doc = await extractor.ExtractAsync(ms, "multipage_table.pdf", meta);
+
+        var tableBlock = Assert.Single(doc.Blocks.OfType<TableBlock>());
+        Assert.Equal(1, tableBlock.Provenance.PageStart);
+        Assert.Equal(2, tableBlock.Provenance.PageEnd);
+
+        // Crucial test (§25): Repeated header row from page 2 must NOT be treated as a data row!
+        Assert.Equal(4, tableBlock.Table.Rows.Count);
+
+        Assert.Equal("40001", tableBlock.Table.Rows[0].CellsByHeader["Address"]);
+        Assert.Equal("Temperature", tableBlock.Table.Rows[0].CellsByHeader["Name"]);
+
+        Assert.Equal("40002", tableBlock.Table.Rows[1].CellsByHeader["Address"]);
+        Assert.Equal("Pressure", tableBlock.Table.Rows[1].CellsByHeader["Name"]);
+
+        Assert.Equal("40003", tableBlock.Table.Rows[2].CellsByHeader["Address"]);
+        Assert.Equal("Voltage", tableBlock.Table.Rows[2].CellsByHeader["Name"]);
+
+        Assert.Equal("40004", tableBlock.Table.Rows[3].CellsByHeader["Address"]);
+        Assert.Equal("Current", tableBlock.Table.Rows[3].CellsByHeader["Name"]);
+    }
+
+    [Fact]
+    public async Task NormalizationVersion_ReingestionBehavior_UnchangedSkipsAndChangedReingests()
+    {
+        var tempDb = Path.Combine(Path.GetTempPath(), FormattableString.Invariant($"pigmentor_normver_{Guid.NewGuid():N}.db"));
+        var connStr = $"Data Source={tempDb}";
+
+        try
+        {
+            using var vectorStore = new SqliteVecStore(new SqliteVecStoreOptions { ConnectionString = connStr, Dimensions = 2, EmbeddingModel = "test-model" });
+            using var stateStore = new SqliteIngestionStateStore(connStr);
+            var chunker = new RecursiveCharacterChunker(maxChunkSize: 500);
+            var embedder = new TestEmbeddingService(2, "test-model");
+
+            var meta = CreateMetadata("doc-version-test", "version_doc.txt");
+            var doc = new Pigmentor.Core.Documents.Document(meta, "RS-485 Modbus RTU Technical Specification Content", "version_doc.txt");
+
+            // 1. Initial ingestion with NormalizationVersion = 1
+            var serviceV1 = new DocumentIngestionService(stateStore, vectorStore, chunker, embedder, normalizationVersion: 1);
+            var res1 = await serviceV1.IngestAsync(doc);
+
+            Assert.False(res1.Skipped);
+            Assert.Equal(1, res1.Version);
+            Assert.Equal(DocumentChangeKind.New, res1.ChangeKind);
+
+            // 2. Second ingestion with same content and same NormalizationVersion = 1 -> unchanged skip!
+            var res2 = await serviceV1.IngestAsync(doc);
+
+            Assert.True(res2.Skipped);
+            Assert.Equal(1, res2.Version);
+            Assert.Equal(DocumentChangeKind.Unchanged, res2.ChangeKind);
+
+            // 3. Third ingestion with same content but changed NormalizationVersion = 2 -> document reingests!
+            var serviceV2 = new DocumentIngestionService(stateStore, vectorStore, chunker, embedder, normalizationVersion: 2);
+            var res3 = await serviceV2.IngestAsync(doc);
+
+            Assert.False(res3.Skipped);
+            Assert.Equal(2, res3.Version);
+            Assert.Equal(DocumentChangeKind.ContentChanged, res3.ChangeKind);
+        }
+        finally
+        {
+            if (File.Exists(tempDb))
+            {
+                try { File.Delete(tempDb); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public void TestPdfFixtures_EnsureFixturesCreatedOnDisk()
+    {
+        var testDir = Path.Combine(AppContext.BaseDirectory, "Fixtures");
+        TestPdfFixtures.EnsureFixturesCreated(testDir);
+
+        var sourceFixturesDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../Fixtures"));
+        if (Directory.Exists(sourceFixturesDir))
+        {
+            TestPdfFixtures.EnsureFixturesCreated(sourceFixturesDir);
+        }
+
+        Assert.True(File.Exists(Path.Combine(testDir, "normal_text.pdf")));
+        Assert.True(File.Exists(Path.Combine(testDir, "pdf_table.pdf")));
+        Assert.True(File.Exists(Path.Combine(testDir, "multipage_table.pdf")));
+        Assert.True(File.Exists(Path.Combine(testDir, "pdf_figure.pdf")));
+        Assert.True(File.Exists(Path.Combine(testDir, "scanned_page.pdf")));
+        Assert.True(File.Exists(Path.Combine(testDir, "scanned_table.pdf")));
+        Assert.True(File.Exists(Path.Combine(testDir, "modbus_table.png")));
+
+        Assert.True(new FileInfo(Path.Combine(testDir, "normal_text.pdf")).Length > 0);
+        Assert.True(new FileInfo(Path.Combine(testDir, "pdf_table.pdf")).Length > 0);
+        Assert.True(new FileInfo(Path.Combine(testDir, "multipage_table.pdf")).Length > 0);
+        Assert.True(new FileInfo(Path.Combine(testDir, "pdf_figure.pdf")).Length > 0);
+        Assert.True(new FileInfo(Path.Combine(testDir, "scanned_page.pdf")).Length > 0);
+        Assert.True(new FileInfo(Path.Combine(testDir, "scanned_table.pdf")).Length > 0);
+        Assert.True(new FileInfo(Path.Combine(testDir, "modbus_table.png")).Length > 0);
     }
 
     #endregion

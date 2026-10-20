@@ -20,6 +20,7 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
     private readonly IDocumentExtractor? _documentExtractor;
     private readonly IDocumentNormalizer? _documentNormalizer;
     private readonly ILogger<DocumentIngestionService>? _logger;
+    private readonly int _normalizationVersion;
 
     public DocumentIngestionService(
         IIngestionStateStore stateStore,
@@ -28,7 +29,8 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         IEmbeddingService embedder,
         IDocumentExtractor? documentExtractor = null,
         IDocumentNormalizer? documentNormalizer = null,
-        ILogger<DocumentIngestionService>? logger = null)
+        ILogger<DocumentIngestionService>? logger = null,
+        int normalizationVersion = IngestionFingerprint.DefaultNormalizationVersion)
     {
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _vectorStore = vectorStore ?? throw new ArgumentNullException(nameof(vectorStore));
@@ -37,6 +39,7 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         _documentExtractor = documentExtractor;
         _documentNormalizer = documentNormalizer;
         _logger = logger;
+        _normalizationVersion = normalizationVersion;
     }
 
     public DocumentIngestionService(
@@ -45,7 +48,7 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         IChunker chunker,
         IEmbeddingService embedder,
         ILogger<DocumentIngestionService>? logger)
-        : this(stateStore, vectorStore, chunker, embedder, null, null, logger)
+        : this(stateStore, vectorStore, chunker, embedder, null, null, logger, IngestionFingerprint.DefaultNormalizationVersion)
     {
     }
 
@@ -89,7 +92,7 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceId);
 
         var docId = document.Metadata.Id;
-        var contentHash = IngestionFingerprint.ComputeContentHash(document.Content);
+        var contentHash = IngestionFingerprint.ComputeContentHash(document.Content, _normalizationVersion);
         var metadataHash = IngestionFingerprint.ComputeMetadataHash(document.Metadata);
 
         // Enforce global DocumentId uniqueness per database across synchronization scopes (§21, §26)

@@ -21,6 +21,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="Fixtures\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Pigmentor.Core\Pigmentor.Core.csproj" />
     <ProjectReference Include="..\..\src\Pigmentor.Ingestion\Pigmentor.Ingestion.csproj" />
     <ProjectReference Include="..\..\src\Pigmentor.Retrieval\Pigmentor.Retrieval.csproj" />

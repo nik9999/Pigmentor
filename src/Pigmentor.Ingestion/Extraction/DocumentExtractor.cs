@@ -15,6 +15,7 @@ public sealed class DocumentExtractor : IDocumentExtractor
     public DocumentExtractor(
         IEnumerable<IFileExtractor>? extractors = null,
         IOcrEngine? ocrEngine = null,
+        IOcrTableDetector? ocrTableDetector = null,
         ExtractionLimits? limits = null)
     {
         _limits = limits ?? ExtractionLimits.Default;
@@ -32,8 +33,8 @@ public sealed class DocumentExtractor : IDocumentExtractor
             RegisterExtractor(new TxtFileExtractor(_limits));
             RegisterExtractor(new XlsxFileExtractor(_limits));
             RegisterExtractor(new DocxFileExtractor(_limits));
-            RegisterExtractor(new ImageFileExtractor(ocrEngine, _limits));
-            RegisterExtractor(new PdfFileExtractor(ocrEngine, _limits));
+            RegisterExtractor(new ImageFileExtractor(ocrEngine, ocrTableDetector, _limits));
+            RegisterExtractor(new PdfFileExtractor(ocrEngine, ocrTableDetector, _limits));
         }
     }
 

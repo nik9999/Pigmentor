@@ -86,12 +86,14 @@ public static class ServiceCollectionExtensions
         configureLimits?.Invoke(limits);
 
         services.AddSingleton(limits);
+        services.AddSingleton<IOcrTableDetector, OcrTableDetector>();
         services.AddSingleton<IDocumentNormalizer, DocumentNormalizer>();
         services.AddSingleton<IDocumentExtractor>(sp =>
         {
             var ocr = sp.GetService<IOcrEngine>();
+            var tableDetector = sp.GetService<IOcrTableDetector>();
             var lim = sp.GetService<ExtractionLimits>() ?? limits;
-            return new DocumentExtractor(ocrEngine: ocr, limits: lim);
+            return new DocumentExtractor(ocrEngine: ocr, ocrTableDetector: tableDetector, limits: lim);
         });
 
         return services;

@@ -1,6 +1,7 @@
 using System.Globalization;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Pigmentor.Ingestion.Normalization.Rules;
 using Pigmentor.Ingestion.Quality;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
@@ -9,16 +10,22 @@ namespace Pigmentor.Ingestion.Extraction;
 
 /// <summary>
 /// Layout-aware PDF extractor that identifies structural headings, paragraphs,
-/// first-class tables (including multi-page continuations), embedded figures, and scanned pages.
+/// first-class tables (including multi-page continuations), embedded figures with surrounding context,
+/// and scanned pages/tables.
 /// </summary>
 public sealed class PdfFileExtractor : IFileExtractor
 {
     private readonly IOcrEngine? _ocrEngine;
+    private readonly IOcrTableDetector _ocrTableDetector;
     private readonly ExtractionLimits _limits;
 
-    public PdfFileExtractor(IOcrEngine? ocrEngine = null, ExtractionLimits? limits = null)
+    public PdfFileExtractor(
+        IOcrEngine? ocrEngine = null,
+        IOcrTableDetector? ocrTableDetector = null,
+        ExtractionLimits? limits = null)
     {
         _ocrEngine = ocrEngine;
+        _ocrTableDetector = ocrTableDetector ?? new OcrTableDetector();
         _limits = limits ?? ExtractionLimits.Default;
     }
 
@@ -52,7 +59,7 @@ public sealed class PdfFileExtractor : IFileExtractor
             cancellationToken.ThrowIfCancellationRequested();
             var page = pdfDocument.GetPage(pageNum);
 
-            // 1. Check for scanned page (Prompt §22)
+            // 1. Check for scanned page (Prompt §14, §22)
             if (await TryExtractScannedPageAsync(page, metadata.Id, counters, blocks, cancellationToken).ConfigureAwait(false))
             {
                 pendingTableBlock = null;
@@ -78,7 +85,7 @@ public sealed class PdfFileExtractor : IFileExtractor
                 counters.TableIndex++;
                 var table = BuildTableFromLines(region.Lines, region.Caption, pageNum, counters.TableIndex);
 
-                // Multi-page table continuation check (Prompt §12)
+                // Multi-page table continuation check (Prompt §23, §24, §25)
                 if (pendingTableBlock != null && CanMergeMultiPageTable(pendingTableBlock.Table, table))
                 {
                     var mergedTable = MergeTables(pendingTableBlock.Table, table, pageNum);
@@ -161,8 +168,8 @@ public sealed class PdfFileExtractor : IFileExtractor
 
             FlushParagraph(currentParagraphLines, metadata.Id, pageNum, currentHeading, counters, blocks);
 
-            // 5. Extract non-decorative figures (Prompt §18-§21)
-            await ExtractFiguresAsync(page, metadata.Id, counters, blocks, cancellationToken).ConfigureAwait(false);
+            // 5. Extract non-decorative figures with surrounding context or route embedded tables (Prompt §2-§6, §15)
+            await ExtractFiguresAsync(page, metadata.Id, counters, blocks, nonTableLines, cancellationToken).ConfigureAwait(false);
         }
 
         return new ExtractedDocument(metadata.Id, filePath, ".pdf", blocks, metadata);
@@ -187,7 +194,9 @@ public sealed class PdfFileExtractor : IFileExtractor
 
             if (pageArea > 0 && (imageArea / pageArea) >= 0.45)
             {
-                if (_ocrEngine != null && image.TryGetPng(out var bytes) && bytes != null)
+                counters.ScannedPagesProcessed++;
+
+                if (_ocrEngine != null && TryGetImageBytes(image, out var bytes))
                 {
                     using var ms = new MemoryStream(bytes);
                     var ocrResult = await _ocrEngine.RecognizeAsync(ms, cancellationToken).ConfigureAwait(false);
@@ -197,11 +206,35 @@ public sealed class PdfFileExtractor : IFileExtractor
                         var assessment = OcrQualityGate.Assess(ocrResult.Text);
                         if (assessment.IsAcceptable)
                         {
-                            var prov = new BlockProvenance(documentId, PageNumber: page.Number);
-                            blocks.Add(new TextBlock(
-                                BlockId: FormattableString.Invariant($"{documentId}#b{counters.BlockIndex++}"),
-                                Text: ocrResult.Text.Trim(),
-                                Provenance: prov));
+                            var caption = FormattableString.Invariant($"Таблица. Страница {page.Number}");
+                            if (_ocrTableDetector.TryDetectTable(ocrResult, documentId, page.Number, caption, out var scannedTable, cancellationToken))
+                            {
+                                counters.TableIndex++;
+                                counters.OcrTablesDetected++;
+                                var prov = new BlockProvenance(
+                                    DocumentId: documentId,
+                                    PageNumber: page.Number,
+                                    PageStart: page.Number,
+                                    PageEnd: page.Number,
+                                    TableId: scannedTable.TableId,
+                                    TableCaption: scannedTable.Caption,
+                                    RowStart: 2,
+                                    RowEnd: scannedTable.Rows.Count + 1);
+
+                                blocks.Add(new TableBlock(
+                                    BlockId: FormattableString.Invariant($"{documentId}#b{counters.BlockIndex++}"),
+                                    Table: scannedTable,
+                                    Provenance: prov));
+                            }
+                            else
+                            {
+                                counters.OcrTablesRejected++;
+                                var prov = new BlockProvenance(documentId, PageNumber: page.Number);
+                                blocks.Add(new TextBlock(
+                                    BlockId: FormattableString.Invariant($"{documentId}#b{counters.BlockIndex++}"),
+                                    Text: ocrResult.Text.Trim(),
+                                    Provenance: prov));
+                            }
                         }
                     }
                 }
@@ -219,10 +252,13 @@ public sealed class PdfFileExtractor : IFileExtractor
         string documentId,
         ExtractionCounters counters,
         List<ExtractedBlock> blocks,
+        List<TextLineDto> nonTableLines,
         CancellationToken cancellationToken)
     {
         foreach (var img in page.GetImages())
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             var w = img.BoundingBox.Width;
             var h = img.BoundingBox.Height;
 
@@ -238,18 +274,15 @@ public sealed class PdfFileExtractor : IFileExtractor
                 continue;
             }
 
-            counters.FigureIndex++;
-            var figureId = FormattableString.Invariant($"Рисунок {counters.FigureIndex}");
-
             // Look for figure caption near image
             var caption = FindNearbyCaption(page, img.BoundingBox, "рисунок", "рис.", "figure", "fig.");
             if (string.IsNullOrWhiteSpace(caption))
             {
-                caption = FormattableString.Invariant($"Рисунок {counters.FigureIndex}. Страница {page.Number}");
+                caption = FormattableString.Invariant($"Рисунок {counters.FigureIndex + 1}. Страница {page.Number}");
             }
 
             var ocrText = string.Empty;
-            if (_ocrEngine != null && img.TryGetPng(out var bytes) && bytes != null)
+            if (_ocrEngine != null && TryGetImageBytes(img, out var bytes))
             {
                 using var ms = new MemoryStream(bytes);
                 var ocrResult = await _ocrEngine.RecognizeAsync(ms, cancellationToken).ConfigureAwait(false);
@@ -258,10 +291,50 @@ public sealed class PdfFileExtractor : IFileExtractor
                     var assessment = OcrQualityGate.Assess(ocrResult.Text);
                     if (assessment.IsAcceptable)
                     {
+                        // Check if embedded image is actually a structured table (§15)
+                        if (_ocrTableDetector.TryDetectTable(ocrResult, documentId, page.Number, caption, out var detectedTable, cancellationToken))
+                        {
+                            counters.TableIndex++;
+                            counters.OcrTablesDetected++;
+                            var tableProv = new BlockProvenance(
+                                DocumentId: documentId,
+                                PageNumber: page.Number,
+                                PageStart: page.Number,
+                                PageEnd: page.Number,
+                                TableId: detectedTable.TableId,
+                                TableCaption: detectedTable.Caption,
+                                RowStart: 2,
+                                RowEnd: detectedTable.Rows.Count + 1,
+                                AssetReference: FormattableString.Invariant($"img-p{page.Number}-{counters.FigureIndex + 1}.png"));
+
+                            blocks.Add(new TableBlock(
+                                BlockId: FormattableString.Invariant($"{documentId}#b{counters.BlockIndex++}"),
+                                Table: detectedTable,
+                                Provenance: tableProv));
+
+                            // Embedded image table routed to TableBlock, do NOT create FigureBlock (§15, §35)
+                            continue;
+                        }
+
                         ocrText = ocrResult.Text.Trim();
+                    }
+                    else
+                    {
+                        counters.FigureOcrRejected++;
                     }
                 }
             }
+
+            counters.FigureIndex++;
+            var figureId = FormattableString.Invariant($"Рисунок {counters.FigureIndex}");
+
+            // Extract bounded surrounding context around the figure (§2-§6)
+            var surroundingContext = ExtractSurroundingContext(
+                nonTableLines,
+                img.BoundingBox,
+                caption,
+                page.Height,
+                _limits.MaxFigureContextChars);
 
             var prov = new BlockProvenance(
                 DocumentId: documentId,
@@ -274,10 +347,154 @@ public sealed class PdfFileExtractor : IFileExtractor
                 FigureId: figureId,
                 Caption: caption,
                 OcrText: ocrText,
-                SurroundingContext: string.Empty,
+                SurroundingContext: surroundingContext,
                 AssetReference: prov.AssetReference,
                 Provenance: prov));
         }
+    }
+
+    private static string ExtractSurroundingContext(
+        List<TextLineDto> nonTableLines,
+        UglyToad.PdfPig.Core.PdfRectangle imageBounds,
+        string caption,
+        double pageHeight,
+        int maxContextChars)
+    {
+        var linesAbove = new List<TextLineDto>();
+        var linesBelow = new List<TextLineDto>();
+
+        foreach (var line in nonTableLines)
+        {
+            // Exclude lines matching caption
+            if (IsCaptionLine(line.Text, caption))
+            {
+                continue;
+            }
+
+            // Exclude page numbers and layout noise
+            if (PageNumberNoiseRule.IsPageNumberNoise(line.Text))
+            {
+                continue;
+            }
+
+            // Exclude decorative short lines / symbols
+            if (line.Text.Trim().Length < 3)
+            {
+                continue;
+            }
+
+            // Exclude extreme running header / footer lines (top 4% or bottom 4% of page)
+            if (line.Bottom > pageHeight * 0.96 || line.Top < pageHeight * 0.04)
+            {
+                continue;
+            }
+
+            // In PdfPig, Bottom is distance from bottom of page. Higher Bottom => higher on page (above image).
+            if (line.Bottom >= imageBounds.Bottom)
+            {
+                linesAbove.Add(line);
+            }
+            else
+            {
+                linesBelow.Add(line);
+            }
+        }
+
+        // Nearest meaningful paragraph BEFORE the figure:
+        // linesAbove is sorted descending by Y (top of page to bottom of page).
+        // The line immediately before the image is linesAbove[^1].
+        var beforeLines = new List<TextLineDto>();
+        for (var i = linesAbove.Count - 1; i >= 0; i--)
+        {
+            var line = linesAbove[i];
+            if (beforeLines.Count > 0)
+            {
+                var prevLine = beforeLines[0];
+                var gap = line.Bottom - prevLine.Top;
+                if (gap > line.Height * 1.8)
+                {
+                    break;
+                }
+            }
+
+            beforeLines.Insert(0, line);
+        }
+
+        // Nearest meaningful paragraph AFTER the figure:
+        // linesBelow is sorted descending by Y.
+        // The line immediately after the image is linesBelow[0].
+        var afterLines = new List<TextLineDto>();
+        for (var i = 0; i < linesBelow.Count; i++)
+        {
+            var line = linesBelow[i];
+            if (afterLines.Count > 0)
+            {
+                var prevLine = afterLines[^1];
+                var gap = prevLine.Bottom - line.Top;
+                if (gap > prevLine.Height * 1.8)
+                {
+                    break;
+                }
+            }
+
+            afterLines.Add(line);
+        }
+
+        var beforeText = string.Join(" ", beforeLines.Select(l => l.Text.Trim())).Trim();
+        var afterText = string.Join(" ", afterLines.Select(l => l.Text.Trim())).Trim();
+
+        var parts = new List<string>(2);
+        if (!string.IsNullOrWhiteSpace(beforeText))
+        {
+            parts.Add(beforeText);
+        }
+
+        if (!string.IsNullOrWhiteSpace(afterText))
+        {
+            parts.Add(afterText);
+        }
+
+        if (parts.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var combined = string.Join("\n", parts);
+        if (combined.Length <= maxContextChars)
+        {
+            return combined;
+        }
+
+        // Safely truncate at word boundary
+        var truncated = combined[..maxContextChars];
+        var lastSpace = truncated.LastIndexOf(' ');
+        if (lastSpace > maxContextChars / 2)
+        {
+            truncated = truncated[..lastSpace];
+        }
+
+        return truncated.Trim();
+    }
+
+    private static bool IsCaptionLine(string lineText, string caption)
+    {
+        var lt = lineText.Trim();
+        var ct = caption.Trim();
+        if (string.Equals(lt, ct, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (ct.StartsWith(lt, StringComparison.OrdinalIgnoreCase) && lt.Length > 8)
+        {
+            return true;
+        }
+
+        var lower = lt.ToLowerInvariant();
+        return lower.StartsWith("рисунок", StringComparison.Ordinal)
+            || lower.StartsWith("рис.", StringComparison.Ordinal)
+            || lower.StartsWith("figure", StringComparison.Ordinal)
+            || lower.StartsWith("fig.", StringComparison.Ordinal);
     }
 
     private static string FindNearbyCaption(Page page, UglyToad.PdfPig.Core.PdfRectangle bounds, params string[] prefixes)
@@ -610,9 +827,14 @@ public sealed class PdfFileExtractor : IFileExtractor
 
     private static bool CanMergeMultiPageTable(ExtractedTable prevTable, ExtractedTable nextTable)
     {
-        // Conservative heuristic (Prompt §12):
-        // 1. Same number of columns
-        // 2. Either columns match or next table caption contains "продолжение" / "continued"
+        // Conservative multi-page merge criteria (§23, §24):
+        // 1. Strictly consecutive pages
+        if (nextTable.PageStart != prevTable.PageEnd + 1)
+        {
+            return false;
+        }
+
+        // 2. Same column count
         if (prevTable.Columns.Count != nextTable.Columns.Count || prevTable.Columns.Count == 0)
         {
             return false;
@@ -620,6 +842,15 @@ public sealed class PdfFileExtractor : IFileExtractor
 
         var isContinuationCaption = nextTable.Caption.Contains("продолжение", StringComparison.OrdinalIgnoreCase)
             || nextTable.Caption.Contains("continued", StringComparison.OrdinalIgnoreCase);
+
+        // 3. If next table has a caption indicating an independent new table (e.g., "Таблица 2" vs "Таблица 1"), reject
+        if (!isContinuationCaption &&
+            !string.IsNullOrWhiteSpace(nextTable.Caption) &&
+            !string.Equals(prevTable.Caption, nextTable.Caption, StringComparison.OrdinalIgnoreCase) &&
+            (nextTable.Caption.StartsWith("таблица", StringComparison.OrdinalIgnoreCase) || nextTable.Caption.StartsWith("table", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
 
         var matchingHeaders = prevTable.Columns.Zip(nextTable.Columns)
             .Count(p => string.Equals(p.First, p.Second, StringComparison.OrdinalIgnoreCase));
@@ -631,13 +862,38 @@ public sealed class PdfFileExtractor : IFileExtractor
 
     private static ExtractedTable MergeTables(ExtractedTable prev, ExtractedTable next, int pageNum)
     {
-        var combinedRows = new List<ExtractedTableRow>(prev.Rows.Count + next.Rows.Count);
+        var combinedRows = new List<ExtractedTableRow>(prev.Rows.Count + next.Rows.Count + 1);
         combinedRows.AddRange(prev.Rows);
 
-        var offset = prev.Rows.Count;
+        var nextColumnsMatchHeader = prev.Columns.Zip(next.Columns)
+            .Count(p => string.Equals(p.First.Trim(), p.Second.Trim(), StringComparison.OrdinalIgnoreCase)) >= Math.Max(1, (int)(prev.Columns.Count * 0.75));
+
+        var cleanNextRows = new List<ExtractedTableRow>();
+
+        // If next page header was not repeated and next.Columns is actually a continuation data row (§25)
+        if (!nextColumnsMatchHeader && next.Columns.Count == prev.Columns.Count)
+        {
+            var cellsByHeader = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            for (var c = 0; c < prev.Columns.Count; c++)
+            {
+                cellsByHeader[prev.Columns[c]] = next.Columns[c];
+            }
+            cleanNextRows.Add(new ExtractedTableRow(1, next.Columns, cellsByHeader));
+        }
+
+        // Append rows skipping any row that repeats the table header (§25: repeated header not treated as data row)
         foreach (var row in next.Rows)
         {
-            combinedRows.Add(row with { RowIndex = offset + row.RowIndex });
+            if (!IsRepeatedHeaderRow(row, prev.Columns))
+            {
+                cleanNextRows.Add(row);
+            }
+        }
+
+        var offset = prev.Rows.Count;
+        for (var i = 0; i < cleanNextRows.Count; i++)
+        {
+            combinedRows.Add(cleanNextRows[i] with { RowIndex = offset + i + 1 });
         }
 
         return prev with
@@ -645,6 +901,37 @@ public sealed class PdfFileExtractor : IFileExtractor
             Rows = combinedRows,
             PageEnd = pageNum
         };
+    }
+
+    private static bool IsRepeatedHeaderRow(ExtractedTableRow row, IReadOnlyList<string> headers)
+    {
+        if (row.Values.Count != headers.Count)
+        {
+            return false;
+        }
+
+        var matching = row.Values.Zip(headers)
+            .Count(p => string.Equals(p.First.Trim(), p.Second.Trim(), StringComparison.OrdinalIgnoreCase));
+
+        return (double)matching / headers.Count >= 0.75;
+    }
+
+    private static bool TryGetImageBytes(IPdfImage image, out byte[] bytes)
+    {
+        if (image.TryGetPng(out var pngBytes) && pngBytes != null && pngBytes.Length > 0)
+        {
+            bytes = pngBytes;
+            return true;
+        }
+
+        if (!image.RawBytes.IsEmpty)
+        {
+            bytes = image.RawBytes.ToArray();
+            return true;
+        }
+
+        bytes = [];
+        return false;
     }
 
     private sealed record TextLineDto(
@@ -666,5 +953,9 @@ public sealed class PdfFileExtractor : IFileExtractor
         public int BlockIndex;
         public int TableIndex;
         public int FigureIndex;
+        public int ScannedPagesProcessed;
+        public int OcrTablesDetected;
+        public int OcrTablesRejected;
+        public int FigureOcrRejected;
     }
 }

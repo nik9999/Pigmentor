@@ -40,5 +40,17 @@ public sealed class NormalizationDiagnostics
 
     /// <summary>Number of non-decorative figures extracted.</summary>
     public int FiguresExtracted { get; set; }
+
+    /// <summary>Number of figure OCR attempts rejected due to poor quality assessment.</summary>
+    public int FigureOcrRejected { get; set; }
+
+    /// <summary>Number of structural tables detected and reconstructed from OCR results.</summary>
+    public int OcrTablesDetected { get; set; }
+
+    /// <summary>Number of OCR results analyzed for table structure but rejected / fallen back to text.</summary>
+    public int OcrTablesRejected { get; set; }
+
+    /// <summary>Number of full-page scanned pages processed via OCR.</summary>
+    public int ScannedPagesProcessed { get; set; }
 }
 
