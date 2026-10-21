@@ -200,11 +200,7 @@ public sealed class RagPipeline : IRagPipeline
         var prep = await PrepareExecutionAsync(request, cancellationToken).ConfigureAwait(false);
 
         cancellationToken.ThrowIfCancellationRequested();
-        for (int i = 0; i < prep.RagContext.Sources.Count; i++)
-        {
-            var s = prep.RagContext.Sources[i];
-            Console.Error.WriteLine($"[DEBUG CHUNK S{i + 1}] ID: {s.Chunk.ChunkId}\n{s.Chunk.Text}\n---");
-        }
+
         var genSw = Stopwatch.StartNew();
         var stream = _chat.GenerateStreamingAsync(prep.Prompt, cancellationToken);
         var answerBuilder = new StringBuilder();
