@@ -306,4 +306,156 @@ public static partial class EvidenceValidator
         }
         return digits;
     }
+
+#if DEBUG
+    /// <summary>
+    /// Debug diagnostic helper that explains the exact reason why evidence was rejected.
+    /// Does not alter production logic or behavior.
+    /// </summary>
+    public static (bool IsValid, string? Reason) DiagnoseEvidence(string answer, IReadOnlyList<Citation> citations)
+    {
+        if (string.IsNullOrWhiteSpace(answer))
+        {
+            return (false, "Answer is null or whitespace");
+        }
+
+        if (citations.Count == 0)
+        {
+            return (false, "No citations provided");
+        }
+
+        if (!ValidateCategoryFidelity(answer))
+        {
+            return (false, "Category fidelity violation (voltage under current or current under voltage)");
+        }
+
+        var combinedSources = string.Join(" ", citations.Select(c => c.Snippet ?? string.Empty));
+        var cleanSources = CleanWhitespace(combinedSources);
+
+        // 2. Model / product identifiers
+        var modelMatches = ModelIdentifierRegex().Matches(answer);
+        foreach (Match m in modelMatches)
+        {
+            var id = m.Value;
+            if (ExcludedIdentifiers.Contains(id))
+            {
+                continue;
+            }
+
+            var inSnippet = ContainsExactWord(cleanSources, id);
+            var inMeta = citations.Any(c => (c.Title != null && ContainsExactWord(c.Title, id)) ||
+                                            (c.DocumentId != null && ContainsExactWord(c.DocumentId, id)));
+            if (!inSnippet && !inMeta)
+            {
+                return (false, $"Model identifier '{id}' not found in cited sources or metadata");
+            }
+        }
+
+        // 3. Tolerance values
+        var toleranceMatches = ToleranceValueRegex().Matches(answer);
+        foreach (Match m in toleranceMatches)
+        {
+            var num = m.Groups["num"].Value;
+            var unit = m.Groups["unit"].Value;
+            var tol = m.Groups["tol"].Value;
+            if (!IsToleranceGrounded(num, unit, tol, cleanSources))
+            {
+                return (false, $"Tolerance '{num} {unit} ±{tol}%' not grounded in cited sources");
+            }
+        }
+
+        // 4. Numeric ranges
+        var rangeMatches = RangeWithUnitRegex().Matches(answer);
+        foreach (Match m in rangeMatches)
+        {
+            var low = m.Groups["low"].Value;
+            var high = m.Groups["high"].Value;
+            var unit = m.Groups["unit"].Value;
+            if (!IsRangeGrounded(low, high, unit, cleanSources))
+            {
+                return (false, $"Numeric range '{low}..{high} {unit}' not grounded in cited sources");
+            }
+        }
+
+        // 5. Standalone percentages
+        var percentMatches = PercentageRegex().Matches(answer);
+        foreach (Match m in percentMatches)
+        {
+            var isPart = toleranceMatches.Any(tm => tm.Index <= m.Index && m.Index + m.Length <= tm.Index + tm.Length);
+            if (isPart)
+            {
+                continue;
+            }
+
+            var numPattern = BuildDecimalRegexPattern(m.Groups[1].Value);
+            var percentPattern = @"\b" + numPattern + @"\s*%";
+            if (!Regex.IsMatch(cleanSources, percentPattern, RegexOptions.IgnoreCase))
+            {
+                return (false, $"Percentage '{m.Value}' not found in cited sources");
+            }
+        }
+
+        // 6. Standalone unit values
+        var unitMatches = UnitValueRegex().Matches(answer);
+        foreach (Match m in unitMatches)
+        {
+            var isPartOfRange = rangeMatches.Any(rm => rm.Index <= m.Index && m.Index + m.Length <= rm.Index + rm.Length);
+            var isPartOfTolerance = toleranceMatches.Any(tm => tm.Index <= m.Index && m.Index + m.Length <= tm.Index + tm.Length);
+            if (isPartOfRange || isPartOfTolerance)
+            {
+                continue;
+            }
+
+            var numPattern = BuildDecimalRegexPattern(m.Groups[1].Value);
+            var unit = m.Groups[2].Value;
+            var unitPattern = @"\b" + numPattern + @"\s*" + Regex.Escape(unit) + @"\b";
+            if (Regex.IsMatch(cleanSources, unitPattern, RegexOptions.IgnoreCase))
+            {
+                continue;
+            }
+
+            var number = m.Groups[1].Value.Replace(',', '.');
+            var numberPattern = @"\b" + numPattern + @"\b";
+            var unitPrefix = unit[..Math.Min(3, unit.Length)];
+            var unitWordPattern = @"\b" + Regex.Escape(unitPrefix) + @"\w*";
+            if (!Regex.IsMatch(cleanSources, numberPattern) || !Regex.IsMatch(cleanSources, unitWordPattern, RegexOptions.IgnoreCase))
+            {
+                return (false, $"Unit value '{m.Value}' not grounded in cited sources");
+            }
+        }
+
+        // 7. Prices
+        var priceMatches = PriceRegex().Matches(answer);
+        if (priceMatches.Count > 0)
+        {
+            var anyPriceGrounded = false;
+            foreach (Match m in priceMatches)
+            {
+                var priceStr = m.Groups[1].Value.Replace(" ", "").Replace("\u00A0", "");
+                if (int.TryParse(priceStr, out var priceVal) && priceVal >= 1000)
+                {
+                    var pricePattern = @"\b" + Regex.Escape(priceStr) + @"\b|" +
+                                       @"\b" + Regex.Escape(InsertSpace(priceStr)) + @"\b";
+                    if (Regex.IsMatch(cleanSources, pricePattern, RegexOptions.IgnoreCase))
+                    {
+                        anyPriceGrounded = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!anyPriceGrounded)
+            {
+                var hasBasePriceInCited = PriceRegex().IsMatch(cleanSources) ||
+                                          Regex.IsMatch(cleanSources, @"\b\d{4,6}\b");
+                if (!hasBasePriceInCited)
+                {
+                    return (false, "Price claims present, but neither stated price nor base price found in cited sources");
+                }
+            }
+        }
+
+        return (true, null);
+    }
+#endif
 }

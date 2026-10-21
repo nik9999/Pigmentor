@@ -146,6 +146,12 @@ public sealed class RagPipeline : IRagPipeline
     {
         var prep = await PrepareExecutionAsync(request, cancellationToken).ConfigureAwait(false);
 
+#if DEBUG
+        Console.Error.WriteLine("========== RAG DEBUG PROMPT ==========");
+        Console.Error.WriteLine(prep.Prompt);
+        Console.Error.WriteLine("========== END RAG DEBUG PROMPT ======");
+#endif
+
         cancellationToken.ThrowIfCancellationRequested();
         var genSw = Stopwatch.StartNew();
         var rawAnswer = await _chat.GenerateAsync(prep.Prompt, cancellationToken).ConfigureAwait(false);
@@ -154,25 +160,79 @@ public sealed class RagPipeline : IRagPipeline
 
         var firstResponse = FinalizeResponse(rawAnswer, prep, genSw.Elapsed);
 
-        // Bounded retry if citations were required but violated (§5)
-        if (prep.RagContext.Sources.Count > 0 &&
+#if DEBUG
+        Console.Error.WriteLine("========== [DEBUG: FIRST GENERATION] ==========");
+        Console.Error.WriteLine($"Raw Answer:\n{rawAnswer}");
+        Console.Error.WriteLine($"Valid Citations Count: {firstResponse.Diagnostics.ValidCitationCount}");
+        Console.Error.WriteLine($"Invalid Citations Count: {firstResponse.Diagnostics.InvalidCitationCount}");
+        Console.Error.WriteLine($"Detected Citations: [{string.Join(", ", firstResponse.Citations.Select(c => $"[S{c.SourceIndex}: {c.DocumentId}]"))}]");
+        Console.Error.WriteLine($"RequiredCitationsSatisfied: {firstResponse.Diagnostics.RequiredCitationsSatisfied}");
+        var (isFirstValid, firstRejectionReason) = EvidenceValidator.DiagnoseEvidence(rawAnswer, firstResponse.Citations);
+        Console.Error.WriteLine($"EvidenceValidator Result: {isFirstValid} (Reason: {firstRejectionReason ?? "None"})");
+        Console.Error.WriteLine("================================================");
+#endif
+
+        var shouldRetry = prep.RagContext.Sources.Count > 0 &&
             !firstResponse.Diagnostics.HasInternalMarkerLeakage &&
             !string.IsNullOrWhiteSpace(rawAnswer) &&
             !SignalsInsufficientContext(firstResponse.Answer) &&
-            !firstResponse.Diagnostics.RequiredCitationsSatisfied)
+            !firstResponse.Diagnostics.RequiredCitationsSatisfied;
+
+#if DEBUG
+        if (shouldRetry)
+        {
+            Console.Error.WriteLine("========== [DEBUG: RETRY TRIGGERED] ==========");
+            string retryReason = firstResponse.Diagnostics.ValidCitationCount == 0
+                ? "No valid citations found"
+                : firstResponse.Diagnostics.InvalidCitationCount > 0
+                    ? $"Invalid citations found ({firstResponse.Diagnostics.InvalidCitationCount})"
+                    : $"Evidence not satisfied: {firstRejectionReason ?? "unknown"}";
+            Console.Error.WriteLine($"Retry Reason: {retryReason}");
+        }
+        else
+        {
+            Console.Error.WriteLine("========== [DEBUG: RETRY NOT TRIGGERED] ==========");
+            Console.Error.WriteLine("[DEBUG: PIPELINE DECISION]: Accepted first response.");
+        }
+#endif
+
+        // Bounded retry if citations were required but violated (§5)
+        if (shouldRetry)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var retryPrompt = RagPromptBuilder.BuildRetryPrompt(request.Question, prep.RagContext, rawAnswer);
+#if DEBUG
+            Console.Error.WriteLine("========== RAG DEBUG RETRY PROMPT ==========");
+            Console.Error.WriteLine(retryPrompt);
+            Console.Error.WriteLine("========== END RAG DEBUG RETRY PROMPT ======");
+#endif
             var retrySw = Stopwatch.StartNew();
             var retryAnswer = await _chat.GenerateAsync(retryPrompt, cancellationToken).ConfigureAwait(false);
             retrySw.Stop();
 
             var retryResponse = FinalizeResponse(retryAnswer, prep, genSw.Elapsed + retrySw.Elapsed);
+#if DEBUG
+            Console.Error.WriteLine("========== [DEBUG: RETRY GENERATION] ==========");
+            Console.Error.WriteLine($"Raw Retry Answer:\n{retryAnswer}");
+            Console.Error.WriteLine($"Retry Valid Citations Count: {retryResponse.Diagnostics.ValidCitationCount}");
+            Console.Error.WriteLine($"Retry Invalid Citations Count: {retryResponse.Diagnostics.InvalidCitationCount}");
+            Console.Error.WriteLine($"Retry Citations: [{string.Join(", ", retryResponse.Citations.Select(c => $"[S{c.SourceIndex}: {c.DocumentId}]"))}]");
+            Console.Error.WriteLine($"Retry RequiredCitationsSatisfied: {retryResponse.Diagnostics.RequiredCitationsSatisfied}");
+            var (isRetryValid, retryRejectionReason) = EvidenceValidator.DiagnoseEvidence(retryAnswer, retryResponse.Citations);
+            Console.Error.WriteLine($"Retry EvidenceValidator Result: {isRetryValid} (Reason: {retryRejectionReason ?? "None"})");
+            Console.Error.WriteLine("===============================================");
+#endif
             if (retryResponse.Diagnostics.RequiredCitationsSatisfied)
             {
+#if DEBUG
+                Console.Error.WriteLine("[DEBUG: PIPELINE DECISION]: Accepted retry response.");
+#endif
                 return retryResponse;
             }
 
+#if DEBUG
+            Console.Error.WriteLine("[DEBUG: PIPELINE DECISION]: Safe failure (retry citations/evidence unsatisfied).");
+#endif
             return new RagResponse(
                 "Не удалось подтвердить факты в ответе обязательными ссылками на источники контекста.",
                 retryResponse.Citations,
