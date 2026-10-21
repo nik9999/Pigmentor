@@ -606,8 +606,8 @@ public sealed class DogfoodingCorrectiveHardeningTests
 
         // Model omits "A-100" but picks correct 100 from A-100
         var implicitCorrectAnswer = "Стоимость до скидки: 100 руб. × 5 = 500 руб. [S1]";
-        var (isCorrectValid, _) = EvidenceValidator.ValidateEvidenceWithReason(implicitCorrectAnswer, [citation], question);
-        Assert.True(isCorrectValid);
+        var (isCorrectValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(implicitCorrectAnswer, [citation], question);
+        Assert.True(isCorrectValid, reason);
     }
 
     [Fact]
@@ -798,7 +798,7 @@ public sealed class DogfoodingCorrectiveHardeningTests
         var citation2 = new Citation(2, "doc-cond", "doc-cond#1", "Conditions", discountSnippet, metaCond);
 
         var question = "Если заказать 5 датчиков TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
-        var answer = "Стоимость до скидки: 19600 руб. [S1]. Стоимость после скидки с учетом 7 % [S2] составит 18228 руб.";
+        var answer = "Стоимость до скидки: 98000 руб. (19600 руб. за единицу) [S1]. Стоимость после скидки с учетом 7 % [S2] составит 91140 руб.";
 
         var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation1, citation2], question);
 
@@ -867,6 +867,104 @@ public sealed class DogfoodingCorrectiveHardeningTests
         var (isCorrectValid, correctReason) = EvidenceValidator.ValidateEvidenceWithReason(answerCorrect, [citationCorrect], question);
         Assert.True(isCorrectValid, correctReason);
         Assert.Null(correctReason);
+    }
+
+    [Fact]
+    public void CalculationSubtotal_CorrectSubtotal_PassesValidation()
+    {
+        var meta = new DocumentMetadata("doc-sub1", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. | Остаток | Гарантия |
+            | --- | --- | --- | --- |
+            | TM-200 | 19600 | 6 | 24 |
+            """;
+        var citation = new Citation(1, "doc-sub1", "doc-sub1#1", "Catalog", snippet, meta);
+        var question = "Если заказать 5 TM-200, какая стоимость до скидки?";
+        var answer = "Стоимость до скидки: 98000 руб. [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void CalculationSubtotal_WrongSubtotal_FailsValidationWithClearReason()
+    {
+        var meta = new DocumentMetadata("doc-sub2", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. | Остаток | Гарантия |
+            | --- | --- | --- | --- |
+            | TM-200 | 19600 | 6 | 24 |
+            """;
+        var citation = new Citation(1, "doc-sub2", "doc-sub2#1", "Catalog", snippet, meta);
+        var question = "Если заказать 5 TM-200, какая стоимость до скидки?";
+        var answer = "Стоимость до скидки: 97000 руб. [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("Заявленная стоимость до скидки 97000 не соответствует расчёту 19600 × 5 = 98000", reason);
+    }
+
+    [Fact]
+    public void CalculationSubtotal_WrongRowPriceArithmetic_FailsValidation()
+    {
+        var meta = new DocumentMetadata("doc-sub3", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            | PR-25  | 22100 |
+            """;
+        var citation = new Citation(1, "doc-sub3", "doc-sub3#1", "Catalog", snippet, meta);
+        var question = "Заказать 5 TM-200";
+        var answer = "22100 × 5 = 110500 руб. [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+    }
+
+    [Fact]
+    public void CalculationSubtotal_PriceColumnAmongOtherNumericColumns_SelectedCorrectly()
+    {
+        var meta = new DocumentMetadata("doc-sub4", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Остаток | Цена, руб. | Гарантия, мес. |
+            | --- | --- | --- | --- |
+            | ZX-410 | 12 | 1250 | 36 |
+            """;
+        var citation = new Citation(1, "doc-sub4", "doc-sub4#1", "Catalog", snippet, meta);
+        var question = "Сколько стоят 3 ZX-410 до скидки?";
+        var answer = "Стоимость до скидки: 3750 руб. [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void CalculationSubtotal_NoPriceHeader_RefrainsFromArbitraryNumericFallback()
+    {
+        var meta = new DocumentMetadata("doc-sub5", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Остаток | Гарантия |
+            | --- | --- | --- |
+            | ZX-410 | 12 | 36 |
+            """;
+        var citation = new Citation(1, "doc-sub5", "doc-sub5#1", "Catalog", snippet, meta);
+        var question = "Сколько стоят 3 ZX-410?";
+        var answer = "По модели ZX-410 указаны остаток 12 и гарантия 36 [S1].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        // Ambiguity policy: no price header -> unresolved, does not falsely reject based on 12*3 or 36*3
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
     }
 
     private sealed class CountingStaticChatClient : IChatClient

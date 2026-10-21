@@ -31,6 +31,19 @@ public static partial class EvidenceValidator
     [GeneratedRegex(@"\b(?:стоимост\w*|стои[тт]\w*|цен\w*|заказ\w*|расчет\w*|расчёт\w*|рассчит\w*|итог\w*|купить|покупк\w*|оплат\w*|cost\w*|price\w*|total\w*|order\w*|calculat\w*|comput\w*|purchas\w*)\b", RegexOptions.IgnoreCase)]
     private static partial Regex CalculationQuestionRegex();
 
+    [GeneratedRegex(@"\b(?:цен\w*|стоимост\w*|price\w*|cost\w*)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex PriceHeaderRegex();
+
+    [GeneratedRegex(
+        @"(?:(?:стоимост\w*|цена)\s+(?:заказа\s+)?(?:до\s+(?:применения\s+)?скидк\w*|без\s+(?:учета\s+|учёта\s+)?скидк\w*)|(?:до\s+(?:применения\s+)?скидк\w*|без\s+(?:учета\s+|учёта\s+)?скидк\w*)|базов\w*\s+(?:стоимост\w*|цена))\s*(?:[:—–\-]|составляет|\bравна\b|\bбудет\b)?\s*(?<val>\d[\d\s]{1,}\d|\d+)(?:[\.,]\d{1,2})?(?!\s*(?:руб\w*\.?|\$|€|₽)?\s*(?:×|\*|x|х))\s*(?:руб\w*\.?|\$|€|₽)?",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex ClaimedSubtotalPhraseRegex();
+
+    [GeneratedRegex(
+        @"(?<op1>\d[\d\s]*\d|\d+)(?:[\.,]\d{1,2})?\s*(?:руб\w*\.?|\$|€|₽)?\s*(?:×|\*|x|х)\s*(?<op2>\d[\d\s]*\d|\d+)(?:[\.,]\d{1,2})?\s*(?:руб\w*\.?|\$|€|₽)?\s*=\s*(?<res>\d[\d\s]*\d|\d+)(?:[\.,]\d{1,2})?\s*(?:руб\w*\.?|\$|€|₽)?",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex ArithmeticMultiplicationRegex();
+
     private static readonly HashSet<string> ExcludedIdentifiers = new(StringComparer.OrdinalIgnoreCase)
     {
         "RS-485", "RS-232", "MODBUS-RTU", "MODBUS-TCP", "MODBUS"
@@ -142,6 +155,13 @@ public static partial class EvidenceValidator
         if (!isRowBindingValid)
         {
             return (false, rowBindingReason);
+        }
+
+        // 3b. Calculation subtotal verification (unit price × quantity)
+        var (isSubtotalValid, subtotalReason) = ValidateCalculationSubtotal(answer, tables, question);
+        if (!isSubtotalValid)
+        {
+            return (false, subtotalReason);
         }
 
         // 4. Structured table extremum fidelity (filter + max/min)
@@ -1345,6 +1365,214 @@ public static partial class EvidenceValidator
         }
 
         return false;
+    }
+
+    private static (bool IsValid, string? Reason) ValidateCalculationSubtotal(
+        string answer,
+        IReadOnlyList<ParsedTable> tables,
+        string? question)
+    {
+        if (string.IsNullOrWhiteSpace(question) || !IsCalculationQuestion(question))
+        {
+            return (true, null);
+        }
+
+        var requestedModels = FindRequestedModelIdentifiers(question);
+        if (requestedModels.Count == 0)
+        {
+            return (true, null);
+        }
+
+        foreach (var modelId in requestedModels)
+        {
+            var qty = ExtractRequestedQuantity(question, modelId);
+            if (qty == null || qty.Value <= 0)
+            {
+                continue;
+            }
+
+            decimal? resolvedUnitPrice = null;
+            foreach (var table in tables)
+            {
+                if (TryResolveUnitPrice(table, modelId, out var up))
+                {
+                    resolvedUnitPrice = up;
+                    break;
+                }
+            }
+
+            if (resolvedUnitPrice == null)
+            {
+                continue;
+            }
+
+            var expectedSubtotal = resolvedUnitPrice.Value * qty.Value;
+
+            var (hasClaim, claimedSubtotal, _) = TryExtractClaimedSubtotal(answer, qty.Value, expectedSubtotal);
+            if (!hasClaim)
+            {
+                continue;
+            }
+
+            if (claimedSubtotal != expectedSubtotal)
+            {
+                return (false, $"Заявленная стоимость до скидки {claimedSubtotal:0.##} не соответствует расчёту {resolvedUnitPrice.Value:0.##} × {qty.Value} = {expectedSubtotal:0.##}");
+            }
+        }
+
+        return (true, null);
+    }
+
+    private static int? ExtractRequestedQuantity(string question, string modelId)
+    {
+        if (string.IsNullOrWhiteSpace(question) || string.IsNullOrWhiteSpace(modelId))
+        {
+            return null;
+        }
+
+        var modelEsc = Regex.Escape(modelId);
+
+        // Quantity before model: "5 датчиков TM-200", "заказать 5 TM-200", "order 3 ZX-410"
+        var patternBefore = @"\b(?<qty>[1-9]\d*)\s+(?:[A-Za-zА-Яа-яЁё\.,/]+\s+){0,3}" + modelEsc + @"\b";
+        var matchesBefore = Regex.Matches(question, patternBefore, RegexOptions.IgnoreCase);
+        if (matchesBefore.Count > 0)
+        {
+            var last = matchesBefore[^1];
+            if (int.TryParse(last.Groups["qty"].Value, out var q) && q > 0)
+            {
+                return q;
+            }
+        }
+
+        // Quantity after model: "TM-200 5 шт.", "TM-200 в количестве 5 шт."
+        var patternAfter = @"\b" + modelEsc + @"\b\s+(?:[A-Za-zА-Яа-яЁё\.,/]+\s+){0,3}(?<qty>[1-9]\d*)\s*(?:шт|штук\w*|единиц\w*|прибор\w*|датчик\w*|unit\w*|piece\w*|pcs?|items?)\b";
+        var matchAfter = Regex.Match(question, patternAfter, RegexOptions.IgnoreCase);
+        if (matchAfter.Success && int.TryParse(matchAfter.Groups["qty"].Value, out var qAfter) && qAfter > 0)
+        {
+            return qAfter;
+        }
+
+        return null;
+    }
+
+    private static int ResolvePriceColumn(ParsedTable table)
+    {
+        if (table.Headers == null || table.Headers.Count == 0)
+        {
+            return -1;
+        }
+
+        var matchingIndices = new List<int>();
+        for (var i = 0; i < table.Headers.Count; i++)
+        {
+            var h = table.Headers[i];
+            if (PriceHeaderRegex().IsMatch(h))
+            {
+                matchingIndices.Add(i);
+            }
+        }
+
+        if (matchingIndices.Count == 1)
+        {
+            return matchingIndices[0];
+        }
+
+        if (matchingIndices.Count > 1)
+        {
+            var baseIndex = matchingIndices.FindIndex(idx =>
+                Regex.IsMatch(table.Headers[idx], @"\b(?:базов\w*|исходн\w*|до\s+скидк\w*|без\s+скидк\w*|unit\s+price|base\s+price)\b", RegexOptions.IgnoreCase));
+            if (baseIndex >= 0)
+            {
+                return matchingIndices[baseIndex];
+            }
+
+            return -1;
+        }
+
+        return -1;
+    }
+
+    private static bool TryResolveUnitPrice(
+        ParsedTable table,
+        string modelId,
+        out decimal unitPrice)
+    {
+        unitPrice = 0m;
+        var priceCol = ResolvePriceColumn(table);
+        if (priceCol < 0)
+        {
+            return false;
+        }
+
+        foreach (var row in table.Rows)
+        {
+            if (RowMatchesModel(row, modelId))
+            {
+                if (priceCol < row.Cells.Count && TryParsePriceDecimal(row.Cells[priceCol], out unitPrice))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryParsePriceDecimal(string text, out decimal price)
+    {
+        price = 0m;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var cleaned = Regex.Replace(text.Trim(), @"(?<=\d)\s+(?=\d)", "");
+        var m = Regex.Match(cleaned, @"\b\d+(?:[\.,]\d{1,2})?\b");
+        if (!m.Success)
+        {
+            return false;
+        }
+
+        var numStr = m.Value.Replace(',', '.');
+        if (decimal.TryParse(numStr, NumberStyles.Number, CultureInfo.InvariantCulture, out price) && price > 0m)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static (bool HasClaim, decimal ClaimedAmount, string RawClaim) TryExtractClaimedSubtotal(
+        string answer,
+        int expectedQty,
+        decimal expectedSubtotal)
+    {
+        // 1. Check arithmetic multiplication where one operand is expectedQty
+        foreach (Match m in ArithmeticMultiplicationRegex().Matches(answer))
+        {
+            if (TryParsePriceDecimal(m.Groups["op1"].Value, out var op1) &&
+                TryParsePriceDecimal(m.Groups["op2"].Value, out var op2) &&
+                TryParsePriceDecimal(m.Groups["res"].Value, out var res))
+            {
+                if (op1 == expectedQty || op2 == expectedQty)
+                {
+                    return (true, res, m.Value);
+                }
+            }
+        }
+
+        // 2. Check explicit subtotal phrase
+        var phraseMatch = ClaimedSubtotalPhraseRegex().Match(answer);
+        if (phraseMatch.Success)
+        {
+            var rawVal = phraseMatch.Groups["val"].Value;
+            if (TryParsePriceDecimal(rawVal, out var phraseAmount))
+            {
+                return (true, phraseAmount, phraseMatch.Value);
+            }
+        }
+
+        return (false, 0m, string.Empty);
     }
 
     internal sealed record TableRowData(
