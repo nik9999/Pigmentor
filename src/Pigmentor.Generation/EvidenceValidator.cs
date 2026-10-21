@@ -80,7 +80,7 @@ public static partial class EvidenceValidator
     private static partial Regex StockHeaderRegex();
 
     [GeneratedRegex(
-        @"(?:\b(?:нет\s+(?:точной\s+|достоверной\s+|какой-либо\s+)?информаци\w*|нет\s+данных|нет\s+сведений)\b|\bинформаци\w*(?:\s+\w+){0,4}\s+отсутству\w*|\bотсутству\w*(?:\s+\w+){0,4}\s+информаци\w*|\bданные(?:\s+\w+){0,4}\s+отсутству\w*|\bотсутству\w*(?:\s+\w+){0,4}\s+данные\b|\bсведения(?:\s+\w+){0,4}\s+отсутству\w*|\bотсутству\w*(?:\s+\w+){0,4}\s+сведения\b|\bнеизвестн\w*\b|\bнедостаточно\s+информаци\w*\b|\b(?:no\s+information|unknown|insufficient\s+information|not\s+specified)\b)",
+        @"(?:\b(?:нет\s+(?:точной\s+|достоверной\s+|какой-либо\s+)?информаци\w*|нет\s+данных|нет\s+сведений)\b|\bинформаци\w*(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+информаци\w*|\bданные(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+данные\b|\bсведения(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+сведения\b|\bнеизвестн\w*\b|\bнедостаточно\s+информаци\w*\b|\b(?:no\s+information|unknown|insufficient\s+information|not\s+specified)\b)",
         RegexOptions.IgnoreCase)]
     private static partial Regex StockUnknownAnswerRegex();
 
@@ -116,7 +116,8 @@ public static partial class EvidenceValidator
         "устройство", "устройства", "устройств", "устройством",
         "элемент", "элементы", "элемента", "элементов",
         "продукт", "продукты", "продукта", "продуктов",
-        "item", "items", "model", "models", "device", "devices", "object", "objects", "product", "products",
+        "склад", "склады", "складе", "склада", "складов", "складах",
+        "item", "items", "model", "models", "device", "devices", "object", "objects", "product", "products", "warehouse", "warehouses",
 
         // Russian extremum words
         "наибольший", "наибольшая", "наибольшее", "наибольшие", "наибольшую", "наибольшего", "наибольшем", "наибольшим", "наибольшими", "наибольших",
@@ -124,6 +125,7 @@ public static partial class EvidenceValidator
         "максимальный", "максимальная", "максимальное", "максимальные", "максимальную", "максимального", "максимальном", "максимальным", "максимальными", "максимальных",
         "минимальный", "минимальная", "минимальное", "минимальные", "минимальную", "минимального", "минимальном", "минимальным", "минимальными", "минимальных",
         "максимум", "минимум", "самый", "самая", "самое", "самые", "самую", "самого", "самом", "самым",
+        "больше", "меньше", "всего", "всех",
 
         // English extremum words
         "maximum", "minimum", "max", "min", "largest", "smallest", "highest", "lowest", "greatest", "least", "top", "bottom", "best", "worst",
@@ -819,6 +821,17 @@ public static partial class EvidenceValidator
             return (true, null);
         }
 
+        // 1. Try horizontal extremum across columns for a specific entity
+        foreach (var table in tables)
+        {
+            var horizontalExtremum = TryResolveHorizontalExtremum(question, table, isMaximum);
+            if (horizontalExtremum != null)
+            {
+                return ValidateHorizontalExtremumAnswer(answer, horizontalExtremum, isMaximum);
+            }
+        }
+
+        // 2. Existing vertical extremum across rows
         foreach (var table in tables)
         {
             if (table.Rows.Count < 2)
@@ -888,6 +901,236 @@ public static partial class EvidenceValidator
         return (true, null);
     }
 
+    internal sealed record HorizontalExtremum(
+        string WinningColumnName,
+        decimal WinningValue,
+        IReadOnlyList<(string ColumnName, decimal Value)> LosingColumns,
+        string EntityName);
+
+    internal static HorizontalExtremum? TryResolveHorizontalExtremum(
+        string question,
+        ParsedTable table,
+        bool isMaximum)
+    {
+        if (string.IsNullOrWhiteSpace(question) || table.Headers == null || table.Headers.Count < 3 || table.Rows.Count == 0)
+        {
+            return null;
+        }
+
+        TableRowData? targetRow = null;
+        string? matchedEntity = null;
+
+        var requestedModels = FindRequestedModelIdentifiers(question);
+        if (requestedModels.Count == 1)
+        {
+            var modelId = requestedModels[0];
+            var matchingRows = table.Rows.Where(r => RowMatchesModel(r, modelId)).ToList();
+            if (matchingRows.Count == 1)
+            {
+                targetRow = matchingRows[0];
+                matchedEntity = modelId;
+            }
+        }
+        else if (requestedModels.Count == 0)
+        {
+            var matchingRows = new List<(TableRowData Row, string Key)>();
+            foreach (var r in table.Rows)
+            {
+                foreach (var k in r.EntityKeys)
+                {
+                    if (ContainsExactWord(question, k))
+                    {
+                        matchingRows.Add((r, k));
+                        break;
+                    }
+                }
+            }
+
+            if (matchingRows.Count == 1)
+            {
+                targetRow = matchingRows[0].Row;
+                matchedEntity = matchingRows[0].Key;
+            }
+        }
+
+        if (targetRow == null || matchedEntity == null)
+        {
+            return null;
+        }
+
+        var candidates = new List<(string Header, decimal Value)>();
+
+        for (var c = 0; c < table.Headers.Count; c++)
+        {
+            if (c >= targetRow.Cells.Count)
+            {
+                continue;
+            }
+
+            var header = table.Headers[c].Trim();
+            var cell = targetRow.Cells[c].Trim();
+
+            // 4. Exclude aggregate columns: Всего, Итого, Total, Sum
+            if (IsAggregateHeader(header))
+            {
+                continue;
+            }
+
+            // 5. Exclude identifier/model column
+            if (IsIdentifierHeader(header) ||
+                ContainsModelIdentifier(cell, matchedEntity) ||
+                targetRow.EntityKeys.Contains(cell))
+            {
+                continue;
+            }
+
+            if (TryParseCellDecimal(cell, out var val))
+            {
+                candidates.Add((header, val));
+            }
+        }
+
+        if (candidates.Count < 2)
+        {
+            return null;
+        }
+
+        var targetVal = isMaximum
+            ? candidates.Max(c => c.Value)
+            : candidates.Min(c => c.Value);
+
+        var winners = candidates.Where(c => c.Value == targetVal).ToList();
+        if (winners.Count != 1)
+        {
+            // Ambiguity policy: tie for extremum => fail-open
+            return null;
+        }
+
+        var winning = winners[0];
+        var losing = candidates.Where(c => c != winning).ToList();
+
+        return new HorizontalExtremum(winning.Header, winning.Value, losing, matchedEntity);
+    }
+
+    private static (bool IsValid, string? Reason) ValidateHorizontalExtremumAnswer(
+        string answer,
+        HorizontalExtremum extremum,
+        bool isMaximum)
+    {
+        var opName = isMaximum ? "максимальное" : "минимальное";
+
+        // 8. If structured evidence is resolved, "no information" / "data absent" must FAIL
+        if (StockUnknownAnswerRegex().IsMatch(answer))
+        {
+            return (false, $"В цитируемых источниках указаны данные по модели '{extremum.EntityName}' ({opName}: {extremum.WinningColumnName} — {extremum.WinningValue:0.##}), но в ответе утверждается об отсутствии информации");
+        }
+
+        // 7. Check that the answer contains the winning column name
+        if (!ContainsColumnReference(answer, extremum.WinningColumnName))
+        {
+            // If answer mentions a losing column name, produce clear diagnostic
+            foreach (var (losingName, losingVal) in extremum.LosingColumns)
+            {
+                if (ContainsColumnReference(answer, losingName))
+                {
+                    return (false, $"Склад/колонка '{losingName}' имеет значение {losingVal:0.##}, тогда как {opName} значение {extremum.WinningValue:0.##} на складе/в колонке '{extremum.WinningColumnName}' (horizontal extremum violation)");
+                }
+            }
+
+            return (false, $"В ответе не указан правильный победитель экстремума (ожидается '{extremum.WinningColumnName}' со значением {extremum.WinningValue:0.##})");
+        }
+
+        // Check that the answer contains the winning value
+        if (!ContainsDecimalValue(answer, extremum.WinningValue))
+        {
+            return (false, $"Для объекта '{extremum.EntityName}' на складе/в колонке '{extremum.WinningColumnName}' указано значение {extremum.WinningValue:0.##}, но это значение не подтверждено в ответе");
+        }
+
+        return (true, null);
+    }
+
+    private static bool IsAggregateHeader(string header)
+    {
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return false;
+        }
+
+        return Regex.IsMatch(header.Trim(), @"^(?:всего|итого|total|sum|сумма|суммарн\w*)(?:[\s,\(\[].*)?$", RegexOptions.IgnoreCase);
+    }
+
+    private static bool IsIdentifierHeader(string header)
+    {
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return false;
+        }
+
+        return Regex.IsMatch(header.Trim(), @"\b(?:модель|артикул|наименование|название|тип|прибор|устройство|датчик|товар|код|model|item|name|type|id|sku|code)\b", RegexOptions.IgnoreCase);
+    }
+
+    private static bool ContainsColumnReference(string text, string columnName)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(columnName))
+        {
+            return false;
+        }
+
+        if (ContainsExactWord(text, columnName))
+        {
+            return true;
+        }
+
+        var cleanHeader = CleanBaseHeader(columnName);
+        var words = Regex.Split(text, @"[^\p{L}\p{Nd}_-]+").Where(w => w.Length >= 3);
+        foreach (var w in words)
+        {
+            if (TokensMatch(w, cleanHeader))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsDecimalValue(string text, decimal value)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var valStr = value.ToString("0.##", CultureInfo.InvariantCulture);
+        var pattern = @"(?<![\d\.,])" + Regex.Escape(valStr) + @"(?![\d\.,])";
+        if (Regex.IsMatch(text, pattern))
+        {
+            return true;
+        }
+
+        var withComma = valStr.Replace('.', ',');
+        var commaPattern = @"(?<![\d\.,])" + Regex.Escape(withComma) + @"(?![\d\.,])";
+        return Regex.IsMatch(text, commaPattern);
+    }
+
+    private static bool TryParseCellDecimal(string text, out decimal number)
+    {
+        number = 0m;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var cleaned = Regex.Replace(text.Trim(), @"(?<=\d)\s+(?=\d)", "");
+        var m = Regex.Match(cleaned, @"(?:\b|\()(?:\+|-)?[0-9]+(?:[\.,][0-9]+)?");
+        if (m.Success)
+        {
+            var clean = m.Value.Replace(',', '.').TrimStart('+');
+            return decimal.TryParse(clean, NumberStyles.Float, CultureInfo.InvariantCulture, out number);
+        }
+        return false;
+    }
+
     private static bool IsExtremumQuestion(string question, out bool isMaximum)
     {
         isMaximum = true;
@@ -898,14 +1141,16 @@ public static partial class EvidenceValidator
 
         var lower = question.ToLowerInvariant();
         if (lower.Contains("наибольш") || lower.Contains("максимальн") || lower.Contains("максимум") ||
-            lower.Contains("maximum") || lower.Contains("largest") || lower.Contains("highest") ||
+            lower.Contains("больше всего") || lower.Contains("больше всех") ||
+            lower.Contains("maximum") || lower.Contains("largest") || lower.Contains("highest") || lower.Contains("most") ||
             Regex.IsMatch(lower, @"\bmax\b"))
         {
             isMaximum = true;
             return true;
         }
         if (lower.Contains("наименьш") || lower.Contains("минимальн") || lower.Contains("минимум") ||
-            lower.Contains("minimum") || lower.Contains("smallest") || lower.Contains("lowest") ||
+            lower.Contains("меньше всего") || lower.Contains("меньше всех") ||
+            lower.Contains("minimum") || lower.Contains("smallest") || lower.Contains("lowest") || lower.Contains("least") || lower.Contains("fewest") ||
             Regex.IsMatch(lower, @"\bmin\b"))
         {
             isMaximum = false;
@@ -1089,7 +1334,7 @@ public static partial class EvidenceValidator
                 for (var i = extIdx + 1; i < Math.Min(words.Count, extIdx + 4); i++)
                 {
                     var val = words[i].ToLowerInvariant();
-                    if (val.Length >= 2 && !ComparisonStopWords.Contains(val))
+                    if (val.Length >= 2 && !ComparisonStopWords.Contains(val) && !ModelIdentifierRegex().IsMatch(words[i]))
                     {
                         tokens.Add(val);
                     }
@@ -1101,7 +1346,7 @@ public static partial class EvidenceValidator
                 for (var i = extIdx - 1; i >= Math.Max(0, extIdx - 3); i--)
                 {
                     var val = words[i].ToLowerInvariant();
-                    if (val.Length >= 2 && !ComparisonStopWords.Contains(val))
+                    if (val.Length >= 2 && !ComparisonStopWords.Contains(val) && !ModelIdentifierRegex().IsMatch(words[i]))
                     {
                         tokens.Add(val);
                     }
@@ -1114,7 +1359,7 @@ public static partial class EvidenceValidator
             foreach (var w in words)
             {
                 var val = w.ToLowerInvariant();
-                if (val.Length >= 2 && !ComparisonStopWords.Contains(val))
+                if (val.Length >= 2 && !ComparisonStopWords.Contains(val) && !ModelIdentifierRegex().IsMatch(w))
                 {
                     tokens.Add(val);
                 }
@@ -1133,6 +1378,8 @@ public static partial class EvidenceValidator
                lower.StartsWith("минимальн", StringComparison.Ordinal) ||
                lower == "максимум" ||
                lower == "минимум" ||
+               lower == "больше" ||
+               lower == "меньше" ||
                lower == "maximum" ||
                lower == "minimum" ||
                lower == "max" ||
@@ -1142,7 +1389,9 @@ public static partial class EvidenceValidator
                lower == "highest" ||
                lower == "lowest" ||
                lower == "greatest" ||
-               lower == "least";
+               lower == "least" ||
+               lower == "most" ||
+               lower == "fewest";
     }
 
     private static bool TokensMatch(string t1, string t2)
@@ -1298,12 +1547,14 @@ public static partial class EvidenceValidator
             return (true, null);
         }
 
-        if (IsExtremumQuestion(question, out _))
+        if (IsExtremumQuestion(question, out var isMaxFidelity))
         {
             var qTokens = ExtractQuestionComparisonTokens(question);
             if (qTokens.Count > 0)
             {
-                var hasRelevantTable = tables.Any(t => ResolveComparisonColumn(question, t) >= 0);
+                var hasRelevantTable = tables.Any(t =>
+                    ResolveComparisonColumn(question, t) >= 0 ||
+                    TryResolveHorizontalExtremum(question, t, isMaxFidelity) != null);
                 if (!hasRelevantTable)
                 {
                     return (false, "Цитируемые источники не содержат таблицу с характеристиками, запрошенными для сравнения");

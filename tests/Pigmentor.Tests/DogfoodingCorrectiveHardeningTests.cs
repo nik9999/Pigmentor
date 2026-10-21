@@ -1293,6 +1293,130 @@ public sealed class DogfoodingCorrectiveHardeningTests
         Assert.Null(reason);
     }
 
+    [Fact]
+    public void HorizontalExtremum_CorrectMax_PassesValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh-hex1", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | PR-10 | 8 | 7 | 6 | 21 |
+            """;
+        var citation = new Citation(1, "doc-wh-hex1", "doc-wh-hex1#1", "Warehouse", snippet, meta);
+        var question = "На каком складе больше всего PR-10 и сколько единиц?";
+        var answer = "Москва — 8 [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void HorizontalExtremum_RealRegressionSuboptimal_FailsValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh-hex2", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | PR-10 | 8 | 7 | 6 | 21 |
+            """;
+        var citation = new Citation(1, "doc-wh-hex2", "doc-wh-hex2#1", "Warehouse", snippet, meta);
+        var question = "На каком складе больше всего PR-10 и сколько единиц?";
+        var answer = "Екатеринбург — 6 [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("horizontal extremum violation", reason);
+    }
+
+    [Fact]
+    public void HorizontalExtremum_FalseUnknown_FailsValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh-hex3", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | PR-10 | 8 | 7 | 6 | 21 |
+            """;
+        var citation = new Citation(1, "doc-wh-hex3", "doc-wh-hex3#1", "Warehouse", snippet, meta);
+        var question = "На каком складе больше всего PR-10 и сколько единиц?";
+        var answer = "Информация о количестве PR-10 на складах отсутствует. [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("отсутствии информации", reason);
+    }
+
+    [Fact]
+    public void HorizontalExtremum_CorrectMin_PassesValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh-hex4", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | PR-10 | 8 | 7 | 6 | 21 |
+            """;
+        var citation = new Citation(1, "doc-wh-hex4", "doc-wh-hex4#1", "Warehouse", snippet, meta);
+        var question = "На каком складе меньше всего PR-10?";
+        var answer = "Екатеринбург — 6 [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void HorizontalExtremum_AggregateColumnExclusion_DoesNotSelectTotal()
+    {
+        var meta = new DocumentMetadata("doc-wh-hex5", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | PR-10 | 8 | 7 | 6 | 21 |
+            """;
+        var citation = new Citation(1, "doc-wh-hex5", "doc-wh-hex5#1", "Warehouse", snippet, meta);
+        var question = "На каком складе больше всего PR-10 и сколько единиц?";
+
+        // Correct warehouse (8) passes because 'Всего' (21) is excluded
+        var correct = "Москва — 8 [S1]";
+        var (isCorValid, corReason) = EvidenceValidator.ValidateEvidenceWithReason(correct, [citation], question);
+        Assert.True(isCorValid, corReason);
+        Assert.Null(corReason);
+
+        // Erroneously claiming 'Всего — 21' as warehouse fails
+        var claimingTotal = "Всего — 21 [S1]";
+        var (isTotValid, totReason) = EvidenceValidator.ValidateEvidenceWithReason(claimingTotal, [citation], question);
+        Assert.False(isTotValid);
+        Assert.NotNull(totReason);
+    }
+
+    [Fact]
+    public void HorizontalExtremum_AmbiguousUnresolvedTable_FailsOpen()
+    {
+        var meta = new DocumentMetadata("doc-wh-hex6", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        // Only 1 numeric column: cannot compare across columns
+        var snippet = """
+            | Модель | Москва |
+            | --- | --- |
+            | PR-10 | 8 |
+            """;
+        var citation = new Citation(1, "doc-wh-hex6", "doc-wh-hex6#1", "Warehouse", snippet, meta);
+        var question = "На каком складе больше всего PR-10?";
+        var answer = "В документе указан только склад Москва с остатком 8 [S1].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        // Ambiguity policy: insufficient columns to compare -> unresolved, fail-open
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
     private sealed class CountingStaticChatClient : IChatClient
     {
         private readonly string _response;
