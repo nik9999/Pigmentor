@@ -282,6 +282,136 @@ public sealed class DogfoodingCorrectiveHardeningTests
     }
 
     [Fact]
+    public void EvidenceValidator_CurrentRanges_RecognizesSemanticallyIdenticalRepresentations_Passes()
+    {
+        var meta = new DocumentMetadata("doc-table", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
+        var chunk = new DocumentChunk(
+            "doc-table#1",
+            "doc-table",
+            0,
+            "Таблица 2.1 | Ток | (-20…+20) | мА | ±40 мкА | | Ток | (0…20) | мА | ±20 мкА | | Ток | (4…20) | мА | ±16 мкА |",
+            0,
+            120,
+            meta);
+        var citation = new Citation(1, "doc-table", "doc-table#1", "MDS AI-8UI", chunk.Text, meta);
+
+        // 1. Parenthesized ranges
+        var answerWithParens = "Диапазоны измерения тока: (-20…+20) мА, (0…20) мА, (4…20) мА [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(answerWithParens, [citation]));
+
+        // 2. Ranges without parentheses
+        var answerWithoutParens = "Диапазоны измерения тока: -20…+20 мА, 0…20 мА, 4…20 мА [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(answerWithoutParens, [citation]));
+
+        // 3. Dot ellipsis formatting
+        var answerWithDots = "Диапазоны измерения тока: (-20...+20) мА, (0...20) мА, (4...20) мА [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(answerWithDots, [citation]));
+
+        // 4. Hyphenated 4-20 mA
+        var answerHyphen = "Диапазон тока составляет 4-20 мА [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(answerHyphen, [citation]));
+
+        // 5. Negative test: ungrounded range
+        var invalidRangeAnswer = "Диапазон тока составляет 10…20 мА [S1].";
+        Assert.False(EvidenceValidator.ValidateEvidence(invalidRangeAnswer, [citation]));
+    }
+
+    [Fact]
+    public void EvidenceValidator_VoltageTolerance_RecognizesMaintenanceAndRejectsEmergencyLimits()
+    {
+        var meta = new DocumentMetadata("docx1", Silo: "technical-docs", "", "", "", "Regulation", 2026, "", DateOnly.MinValue, "PX-400");
+        var maintenanceChunk = new DocumentChunk(
+            "docx1#maint",
+            "docx1",
+            0,
+            "Таблица 1 Проверка питания: напряжение питания 24 В ±10 % постоянного тока.",
+            0,
+            100,
+            meta);
+        var emergencyChunk = new DocumentChunk(
+            "docx1#emerg",
+            "docx1",
+            1,
+            "Раздел 3 Аварийные условия: отключение питания при напряжении ниже 20 В или выше 28 В.",
+            0,
+            100,
+            meta);
+
+        var maintCitation = new Citation(1, "docx1", "docx1#maint", "PX-400", maintenanceChunk.Text, meta);
+        var emergCitation = new Citation(2, "docx1", "docx1#emerg", "PX-400", emergencyChunk.Text, meta);
+
+        // Grounded tolerance with formatting variants citing Table 1
+        Assert.True(EvidenceValidator.ValidateEvidence("Напряжение питания: 24 В ±10% [S1].", [maintCitation]));
+        Assert.True(EvidenceValidator.ValidateEvidence("Напряжение питания: 24 В ± 10 % [S1].", [maintCitation]));
+        Assert.True(EvidenceValidator.ValidateEvidence("Напряжение питания: 24В ±10% [S1].", [maintCitation]));
+        Assert.True(EvidenceValidator.ValidateEvidence("Напряжение питания: 24 В ±10 % [S1].", [maintCitation]));
+
+        // Negative test: answer claims 24 В ±10% citing ONLY emergency limits (20 В / 28 В) -> must fail
+        Assert.False(EvidenceValidator.ValidateEvidence("Напряжение питания: 24 В ±10% [S2].", [emergCitation]));
+
+        // Negative test: answer claims incorrect tolerance 24 В ±20% citing Table 1 -> must fail
+        Assert.False(EvidenceValidator.ValidateEvidence("Напряжение питания: 24 В ±20% [S1].", [maintCitation]));
+    }
+
+    [Fact]
+    public void EvidenceValidator_TableCategoryFidelity_PreventsVoltageInCurrentCategoryAndViceVersa()
+    {
+        var meta = new DocumentMetadata("doc-table", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
+        var chunk = new DocumentChunk(
+            "doc-table#1",
+            "doc-table",
+            0,
+            "Таблица 2.1 | Напряжение | (-150…+150) | мВ | | Напряжение | (0…10) | В | | Ток | (-20…+20) | мА | | Ток | (4…20) | мА |",
+            0,
+            120,
+            meta);
+        var citation = new Citation(1, "doc-table", "doc-table#1", "MDS AI-8UI", chunk.Text, meta);
+
+        // Misclassified: voltage range (0…10) В placed under "Ток:" category
+        var misclassifiedAnswer =
+            "Напряжение:\n" +
+            "- (-150…+150) мВ [S1]\n\n" +
+            "Ток:\n" +
+            "- (-20…+20) мА [S1]\n" +
+            "- (0…10) В [S1]\n" +
+            "- (4…20) мА [S1]";
+        Assert.False(EvidenceValidator.ValidateEvidence(misclassifiedAnswer, [citation]));
+
+        // Correctly classified: voltage under Напряжение, current under Ток
+        var correctlyClassifiedAnswer =
+            "Напряжение:\n" +
+            "- (-150…+150) мВ [S1]\n" +
+            "- (0…10) В [S1]\n\n" +
+            "Ток:\n" +
+            "- (-20…+20) мА [S1]\n" +
+            "- (4…20) мА [S1]";
+        Assert.True(EvidenceValidator.ValidateEvidence(correctlyClassifiedAnswer, [citation]));
+    }
+
+    [Fact]
+    public void EvidenceValidator_ProximateCitations_EnforcesClaimToCitationAttribution()
+    {
+        var meta = new DocumentMetadata("cat1", Silo: "product-catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var catChunk = new DocumentChunk("cat1#1", "cat1", 0, "Датчик TM-200 стоит 19600 руб. Диапазон от -100 до +300 °C.", 0, 100, meta);
+        var condChunk = new DocumentChunk("cat1#2", "cat1", 1, "Скидка от 5 единиц составляет 7 %.", 0, 100, meta);
+
+        var s1 = new Citation(1, "cat1", "cat1#1", "Catalog", catChunk.Text, meta);
+        var s2 = new Citation(2, "cat1", "cat1#2", "Conditions", condChunk.Text, meta);
+
+        // Factual claim TM-200 / 19600 cited with S2 (Conditions, which does not contain 19600) -> must FAIL
+        var wrongAttribution =
+            "Стоимость датчика TM-200 составляет 19 600 руб. [S2]\n" +
+            "Скидка от 5 единиц составляет 7 % [S2]";
+        Assert.False(EvidenceValidator.ValidateEvidence(wrongAttribution, [s2]));
+
+        // Correct attribution: price cited with S1, discount cited with S2 -> must PASS
+        var correctAttribution =
+            "Стоимость датчика TM-200 составляет 19 600 руб. [S1]\n" +
+            "Скидка от 5 единиц составляет 7 % [S2]";
+        Assert.True(EvidenceValidator.ValidateEvidence(correctAttribution, [s1, s2]));
+    }
+
+    [Fact]
     public async Task BoundedRetry_RetriesAtMostOnce_AndFailsSafelyIfStillUnsatisfied()
     {
         var meta = new DocumentMetadata("doc1", "", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "Doc");
