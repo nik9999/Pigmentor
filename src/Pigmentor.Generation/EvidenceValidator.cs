@@ -28,6 +28,9 @@ public static partial class EvidenceValidator
     [GeneratedRegex(@"\b(\d[\d\s]{2,}\d)\s*(?:руб\w*|\$|€)", RegexOptions.IgnoreCase)]
     private static partial Regex PriceRegex();
 
+    [GeneratedRegex(@"\b(?:стоимост\w*|стои[тт]\w*|цен\w*|заказ\w*|расчет\w*|расчёт\w*|рассчит\w*|итог\w*|купить|покупк\w*|оплат\w*|cost\w*|price\w*|total\w*|order\w*|calculat\w*|comput\w*|purchas\w*)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex CalculationQuestionRegex();
+
     private static readonly HashSet<string> ExcludedIdentifiers = new(StringComparer.OrdinalIgnoreCase)
     {
         "RS-485", "RS-232", "MODBUS-RTU", "MODBUS-TCP", "MODBUS"
@@ -126,6 +129,13 @@ public static partial class EvidenceValidator
 
         // Extract structured markdown tables from citations
         var tables = ExtractTables(citations);
+
+        // 2b. Calculation source row grounding for requested model
+        var (isCalcSourceValid, calcSourceReason) = ValidateCalculationSourceRow(tables, question);
+        if (!isCalcSourceValid)
+        {
+            return (false, calcSourceReason);
+        }
 
         // 3. Structured table row binding
         var (isRowBindingValid, rowBindingReason) = ValidateTableRowBinding(answer, tables, question);
@@ -1218,6 +1228,123 @@ public static partial class EvidenceValidator
         }
 
         return (true, null);
+    }
+
+    private static (bool IsValid, string? Reason) ValidateCalculationSourceRow(
+        IReadOnlyList<ParsedTable> tables,
+        string? question)
+    {
+        if (string.IsNullOrWhiteSpace(question) || !IsCalculationQuestion(question))
+        {
+            return (true, null);
+        }
+
+        var requestedModels = FindRequestedModelIdentifiers(question);
+        if (requestedModels.Count == 0)
+        {
+            return (true, null);
+        }
+
+        foreach (var modelId in requestedModels)
+        {
+            if (!CitationTablesContainEntityRowWithNumericData(tables, modelId))
+            {
+                return (false, $"Цитируемые источники не содержат строку таблицы для запрошенной модели '{modelId}' с исходными данными для расчёта");
+            }
+        }
+
+        return (true, null);
+    }
+
+    private static bool IsCalculationQuestion(string question)
+    {
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            return false;
+        }
+
+        if (IsExtremumQuestion(question, out _))
+        {
+            return false;
+        }
+
+        return CalculationQuestionRegex().IsMatch(question);
+    }
+
+    private static List<string> FindRequestedModelIdentifiers(string question)
+    {
+        var list = new List<string>();
+        foreach (Match m in ModelIdentifierRegex().Matches(question))
+        {
+            var id = m.Value;
+            if (!ExcludedIdentifiers.Contains(id) && !list.Contains(id, StringComparer.OrdinalIgnoreCase))
+            {
+                list.Add(id);
+            }
+        }
+        return list;
+    }
+
+    private static bool CitationTablesContainEntityRowWithNumericData(
+        IReadOnlyList<ParsedTable> tables,
+        string modelId)
+    {
+        foreach (var table in tables)
+        {
+            foreach (var row in table.Rows)
+            {
+                if (RowMatchesModel(row, modelId) && RowHasNumericData(row, modelId))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool RowMatchesModel(TableRowData row, string modelId)
+    {
+        if (row.EntityKeys.Contains(modelId))
+        {
+            return true;
+        }
+
+        for (var i = 0; i < row.Cells.Count; i++)
+        {
+            if (ContainsModelIdentifier(row.Cells[i], modelId))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool RowHasNumericData(TableRowData row, string modelId)
+    {
+        if (row.DistinctValues.Any(v => double.TryParse(v.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && d > 0))
+        {
+            return true;
+        }
+
+        for (var i = 0; i < row.Cells.Count; i++)
+        {
+            var cell = row.Cells[i];
+            if (ContainsModelIdentifier(cell, modelId))
+            {
+                continue;
+            }
+
+            var normalized = Regex.Replace(cell, @"(?<=\d)\s+(?=\d)", "");
+            var m = Regex.Match(normalized, @"\b\d+(?:[\.,]\d+)?\b");
+            if (m.Success && double.TryParse(m.Value.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var val) && val > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal sealed record TableRowData(

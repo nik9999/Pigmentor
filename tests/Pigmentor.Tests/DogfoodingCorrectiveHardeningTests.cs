@@ -755,6 +755,120 @@ public sealed class DogfoodingCorrectiveHardeningTests
         Assert.True(isCit2Valid);
     }
 
+    [Fact]
+    public void CalculationSourceRow_MissingModelRow_OnlyDiscountCited_FailsValidation()
+    {
+        var meta = new DocumentMetadata("doc-cond", Silo: "catalog", "", "", "", "Conditions", 2026, "", DateOnly.MinValue, "Conditions");
+        var discountSnippet = """
+            | Условие | Скидка |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            | Скидка от 10 единиц одной модели | 10 % |
+            """;
+        var citation2 = new Citation(2, "doc-cond", "doc-cond#1", "Conditions", discountSnippet, meta);
+
+        var question = "Если заказать 5 датчиков TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
+        var answer = "Стоимость до скидки: 22100 руб. Стоимость после скидки (7%): 12838 руб. (22100 * 0,93) [S2]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation2], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("Цитируемые источники не содержат строку таблицы для запрошенной модели 'TM-200' с исходными данными для расчёта", reason);
+    }
+
+    [Fact]
+    public void CalculationSourceRow_RequestedModelRowPresent_PassesSourceRowValidation()
+    {
+        var metaPrices = new DocumentMetadata("doc-prices", Silo: "catalog", "", "", "", "Prices", 2026, "", DateOnly.MinValue, "Prices");
+        var priceSnippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            | PR-25 | 22100 |
+            """;
+        var citation1 = new Citation(1, "doc-prices", "doc-prices#1", "Prices", priceSnippet, metaPrices);
+
+        var metaCond = new DocumentMetadata("doc-cond", Silo: "catalog", "", "", "", "Conditions", 2026, "", DateOnly.MinValue, "Conditions");
+        var discountSnippet = """
+            | Условие | Скидка |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            """;
+        var citation2 = new Citation(2, "doc-cond", "doc-cond#1", "Conditions", discountSnippet, metaCond);
+
+        var question = "Если заказать 5 датчиков TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
+        var answer = "Стоимость до скидки: 19600 руб. [S1]. Стоимость после скидки с учетом 7 % [S2] составит 18228 руб.";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation1, citation2], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void CalculationSourceRow_WrongModelRowOnly_FailsValidation()
+    {
+        var metaPrices = new DocumentMetadata("doc-prices", Silo: "catalog", "", "", "", "Prices", 2026, "", DateOnly.MinValue, "Prices");
+        var priceSnippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | PR-25 | 22100 |
+            """;
+        var citation1 = new Citation(1, "doc-prices", "doc-prices#1", "Prices", priceSnippet, metaPrices);
+
+        var metaCond = new DocumentMetadata("doc-cond", Silo: "catalog", "", "", "", "Conditions", 2026, "", DateOnly.MinValue, "Conditions");
+        var discountSnippet = """
+            | Условие | Скидка |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            """;
+        var citation2 = new Citation(2, "doc-cond", "doc-cond#1", "Conditions", discountSnippet, metaCond);
+
+        var question = "Если заказать 5 датчиков TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
+        var answer = "Стоимость до скидки: 22100 руб. [S1]. Скидка составляет 7 % [S2].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation1, citation2], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("Цитируемые источники не содержат строку таблицы для запрошенной модели 'TM-200' с исходными данными для расчёта", reason);
+    }
+
+    [Fact]
+    public void CalculationSourceRow_GenericArtificialModel_PassesValidationOnlyWhenRowPresent()
+    {
+        var meta = new DocumentMetadata("doc-gen", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippetWrong = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | AB-900 | 1250 |
+            """;
+        var citationWrong = new Citation(1, "doc-gen", "doc-gen#1", "Catalog", snippetWrong, meta);
+
+        var snippetCorrect = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | ZX-410 | 1250 |
+            """;
+        var citationCorrect = new Citation(2, "doc-gen", "doc-gen#2", "Catalog", snippetCorrect, meta);
+
+        var question = "Какова стоимость заказа 10 приборов ZX-410?";
+
+        // Answer citing only AB-900 table -> fails
+        var answerWrong = "Стоимость заказа ZX-410 составляет 12500 руб. [S1]";
+        var (isWrongValid, wrongReason) = EvidenceValidator.ValidateEvidenceWithReason(answerWrong, [citationWrong], question);
+        Assert.False(isWrongValid);
+        Assert.NotNull(wrongReason);
+        Assert.Contains("Цитируемые источники не содержат строку таблицы для запрошенной модели 'ZX-410' с исходными данными для расчёта", wrongReason);
+
+        // Answer citing ZX-410 table -> passes
+        var answerCorrect = "Стоимость заказа ZX-410 составляет 12500 руб. [S2]";
+        var (isCorrectValid, correctReason) = EvidenceValidator.ValidateEvidenceWithReason(answerCorrect, [citationCorrect], question);
+        Assert.True(isCorrectValid, correctReason);
+        Assert.Null(correctReason);
+    }
+
     private sealed class CountingStaticChatClient : IChatClient
     {
         private readonly string _response;
