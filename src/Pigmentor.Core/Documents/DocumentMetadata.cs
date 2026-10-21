@@ -19,11 +19,11 @@ namespace Pigmentor.Core.Documents;
 public sealed record DocumentMetadata(
     string Id,
     string Silo,
-    string Department,
-    string Office,
-    string ConfidentialityLevel,
-    string DocumentType,
-    int FiscalYear,
-    string Author,
-    DateOnly LastModified,
-    string Title);
+    string Department = "",
+    string Office = "",
+    string ConfidentialityLevel = "",
+    string DocumentType = "",
+    int FiscalYear = 0,
+    string Author = "",
+    DateOnly LastModified = default,
+    string Title = "");

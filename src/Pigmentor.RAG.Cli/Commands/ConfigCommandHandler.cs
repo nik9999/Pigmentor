@@ -26,7 +26,8 @@ public sealed class ConfigCommandHandler
         _console.WriteLine("Pigmentor Configuration:");
         _console.WriteLine();
         _console.WriteLine("Workspace:");
-        _console.WriteLine($"  Root Path:           {config.RootPath ?? effectiveRoot}");
+        var configuredRoot = config.RootPath ?? "data";
+        _console.WriteLine($"  Root Path:           {configuredRoot} (resolved: {effectiveRoot})");
         _console.WriteLine($"  Database:            {dbPath}");
         _console.WriteLine();
         _console.WriteLine("Chat:");
@@ -38,8 +39,22 @@ public sealed class ConfigCommandHandler
         _console.WriteLine($"  Provider:            {config.Embeddings?.Provider ?? "(none)"}");
         _console.WriteLine($"  Model:               {config.Embeddings?.Model ?? "(none)"}");
         _console.WriteLine($"  Endpoint:            {config.Embeddings?.Endpoint ?? "(none)"}");
-        _console.WriteLine($"  Model Path:          {config.Embeddings?.ModelPath ?? "(none)"}");
-        _console.WriteLine($"  Tokenizer Path:      {config.Embeddings?.TokenizerPath ?? "(none)"}");
+        if (string.Equals(config.Embeddings?.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
+        {
+            var resolvedModel = !string.IsNullOrWhiteSpace(config.Embeddings?.ModelPath)
+                ? _paths.ResolveApplicationPath(config.Embeddings.ModelPath)
+                : "(none)";
+            var resolvedTok = !string.IsNullOrWhiteSpace(config.Embeddings?.TokenizerPath)
+                ? _paths.ResolveApplicationPath(config.Embeddings.TokenizerPath)
+                : "(none)";
+            _console.WriteLine($"  Model Path:          {config.Embeddings?.ModelPath ?? "(none)"} (resolved: {resolvedModel})");
+            _console.WriteLine($"  Tokenizer Path:      {config.Embeddings?.TokenizerPath ?? "(none)"} (resolved: {resolvedTok})");
+        }
+        else
+        {
+            _console.WriteLine($"  Model Path:          {config.Embeddings?.ModelPath ?? "(none)"}");
+            _console.WriteLine($"  Tokenizer Path:      {config.Embeddings?.TokenizerPath ?? "(none)"}");
+        }
         _console.WriteLine($"  Dimensions:          {config.Embeddings?.Dimensions ?? 0}");
         _console.WriteLine();
         _console.WriteLine("GigaChat:");

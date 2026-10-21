@@ -72,6 +72,29 @@ public sealed class PigmentorConfigManager
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
     }
 
+    public static PigmentorConfig CreateDefaultConfig() => new()
+    {
+        RootPath = "data",
+        Chat = new()
+        {
+            Provider = "Ollama",
+            Model = "gigachat3-32k:latest",
+            Endpoint = "http://192.168.215.17:11434"
+        },
+        Embeddings = new()
+        {
+            Provider = "Onnx",
+            ModelPath = "models/bge-m3/model.onnx",
+            TokenizerPath = "models/bge-m3/tokenizer.json",
+            Dimensions = 1024
+        },
+        GigaChat = new()
+        {
+            Scope = "GIGACHAT_API_PERS",
+            VerifySsl = true
+        }
+    };
+
     /// <summary>
     /// Loads configuration from disk, validating strict schema and zero-secrets policy.
     /// </summary>
@@ -79,10 +102,7 @@ public sealed class PigmentorConfigManager
     {
         if (!File.Exists(_paths.ConfigFilePath))
         {
-            return new PigmentorConfig
-            {
-                RootPath = _paths.DefaultRootPath
-            };
+            return CreateDefaultConfig();
         }
 
         var jsonBytes = await File.ReadAllBytesAsync(_paths.ConfigFilePath, cancellationToken).ConfigureAwait(false);
@@ -154,7 +174,11 @@ public sealed class PigmentorConfigManager
     {
         _paths.EnsureConfigDirectoryCreated();
 
-        var effectiveRoot = _paths.ResolveEffectiveRootPath(explicitRootPath);
+        var rootToConfigure = !string.IsNullOrWhiteSpace(explicitRootPath)
+            ? explicitRootPath.Trim()
+            : (_paths.DefaultRootPath.Equals(Path.Combine(_paths.ApplicationBaseDirectory, "data"), StringComparison.OrdinalIgnoreCase) ? "data" : _paths.DefaultRootPath);
+
+        var effectiveRoot = _paths.ResolveEffectiveRootPath(rootToConfigure);
         _paths.EnsureWorkspaceDirectories(effectiveRoot);
 
         if (File.Exists(_paths.ConfigFilePath))
@@ -162,10 +186,8 @@ public sealed class PigmentorConfigManager
             return false;
         }
 
-        var config = new PigmentorConfig
-        {
-            RootPath = effectiveRoot
-        };
+        var config = CreateDefaultConfig();
+        config.RootPath = rootToConfigure;
 
         await SaveAsync(config, cancellationToken).ConfigureAwait(false);
         return true;
@@ -219,7 +241,7 @@ public sealed class PigmentorConfigManager
         switch (normalizedKey.ToLowerInvariant())
         {
             case "rootpath":
-                config.RootPath = _paths.ResolveEffectiveRootPath(value);
+                config.RootPath = value.Trim();
                 break;
 
             case "chat.provider":
@@ -286,10 +308,12 @@ public sealed class PigmentorConfigManager
 
     /// <summary>
     /// Validates the configuration model and returns actionable error messages.
+    /// Application-relative paths are resolved via <paramref name="paths"/> relative to AppContext.BaseDirectory.
     /// </summary>
-    public static List<string> Validate(PigmentorConfig config)
+    public static List<string> Validate(PigmentorConfig config, IPigmentorAppPaths? paths = null, bool validateFilesExist = true)
     {
         ArgumentNullException.ThrowIfNull(config);
+        var resolver = paths ?? new PigmentorAppPaths();
         var errors = new List<string>();
 
         // Workspace RootPath
@@ -301,7 +325,7 @@ public sealed class PigmentorConfigManager
         {
             try
             {
-                var fullRoot = Path.GetFullPath(config.RootPath);
+                var fullRoot = resolver.ResolveEffectiveRootPath(config.RootPath);
                 if (File.Exists(fullRoot))
                 {
                     errors.Add($"rootPath '{config.RootPath}' points to an existing file, but a workspace directory is required.");
@@ -381,9 +405,26 @@ public sealed class PigmentorConfigManager
                 {
                     errors.Add("Embedding modelPath must be specified when provider is 'Onnx'.");
                 }
-                else if (!File.Exists(config.Embeddings.ModelPath))
+                else if (validateFilesExist)
                 {
-                    errors.Add($"ONNX embedding model file not found at '{config.Embeddings.ModelPath}'.");
+                    var resolvedModel = resolver.ResolveApplicationPath(config.Embeddings.ModelPath);
+                    if (!File.Exists(resolvedModel))
+                    {
+                        errors.Add($"ONNX model not found:\n  configured: {config.Embeddings.ModelPath}\n  resolved:   {resolvedModel}");
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(config.Embeddings.TokenizerPath))
+                {
+                    errors.Add("Embedding tokenizerPath must be specified when provider is 'Onnx'.");
+                }
+                else if (validateFilesExist)
+                {
+                    var resolvedTokenizer = resolver.ResolveApplicationPath(config.Embeddings.TokenizerPath);
+                    if (!File.Exists(resolvedTokenizer))
+                    {
+                        errors.Add($"ONNX tokenizer not found:\n  configured: {config.Embeddings.TokenizerPath}\n  resolved:   {resolvedTokenizer}");
+                    }
                 }
             }
 

@@ -7,6 +7,7 @@ using Pigmentor.App.Runtime;
 using Pigmentor.App.Security;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Pigmentor.Core.Filtering;
 using Pigmentor.Generation;
 using Pigmentor.Tests.Fixtures;
 
@@ -35,7 +36,6 @@ public sealed class RuntimeAndProviderTests : IDisposable
 
     public void Dispose()
     {
-        SqliteConnection.ClearAllPools();
         try
         {
             if (Directory.Exists(_tempDirectory))
@@ -45,7 +45,18 @@ public sealed class RuntimeAndProviderTests : IDisposable
         }
         catch
         {
-            // Best effort cleanup
+            try
+            {
+                SqliteConnection.ClearAllPools();
+                if (Directory.Exists(_tempDirectory))
+                {
+                    Directory.Delete(_tempDirectory, recursive: true);
+                }
+            }
+            catch
+            {
+                // Best effort cleanup
+            }
         }
     }
 
@@ -87,7 +98,13 @@ public sealed class RuntimeAndProviderTests : IDisposable
             {
                 await File.WriteAllBytesAsync(fakeOnnx, [0x08, 0x01]);
             }
+            var fakeTok = Path.Combine(_tempDirectory, "tokenizer.json");
+            if (!File.Exists(fakeTok))
+            {
+                await File.WriteAllTextAsync(fakeTok, "{}");
+            }
             config.Embeddings!.ModelPath = fakeOnnx;
+            config.Embeddings.TokenizerPath = fakeTok;
         }
 
         // Test runtime creation with mock clients (avoiding external network calls in unit tests)
@@ -154,6 +171,54 @@ public sealed class RuntimeAndProviderTests : IDisposable
         // The external instances must NOT have been disposed
         Assert.False(disposableChatClient.IsDisposed);
         Assert.False(disposableEmbedder.IsDisposed);
+    }
+
+    [Fact]
+    public async Task Runtime_Disposal_IsIdempotentAndEliminatesDoubleDispose()
+    {
+        var config = new PigmentorConfig
+        {
+            RootPath = _tempDirectory,
+            Chat = new() { Provider = "Ollama" },
+            Embeddings = new() { Provider = "Ollama", Dimensions = 64 }
+        };
+
+        var countingVectorStore = new CountingDisposableVectorStore();
+
+        var runtime = await PigmentorAppRuntime.CreateAsync(
+            config: config,
+            credentialProvider: _credentialResolver,
+            chatClientOverride: _chatClient,
+            embeddingServiceOverride: _embedder,
+            vectorStoreOverride: countingVectorStore);
+
+        // First disposal via DisposeAsync
+        await runtime.DisposeAsync();
+
+        // Subsequent disposal via Dispose
+        runtime.Dispose();
+
+        // External override must never be disposed by runtime
+        Assert.Equal(0, countingVectorStore.DisposeCallCount);
+    }
+
+    private sealed class CountingDisposableVectorStore : IVectorStore, IDisposable, IAsyncDisposable
+    {
+        public int DisposeCallCount { get; private set; }
+
+        public string CollectionName => "test";
+
+        public void Dispose() => DisposeCallCount++;
+        public ValueTask DisposeAsync()
+        {
+            DisposeCallCount++;
+            return ValueTask.CompletedTask;
+        }
+
+        public Task EnsureCollectionExistsAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task UpsertAsync(IEnumerable<EmbeddedChunk> chunks, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<IReadOnlyList<RetrievalResult>> SearchAsync(ReadOnlyMemory<float> queryVector, int topK, MetadataFilter? filter = null, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<RetrievalResult>>([]);
+        public Task DeleteAsync(IEnumerable<string> chunkIds, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class TrackingDisposableChatClient : IChatClient, IDisposable

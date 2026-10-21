@@ -7,6 +7,19 @@ namespace Pigmentor.App.Paths;
 public interface IPigmentorAppPaths
 {
     /// <summary>
+    /// Base directory of the application/executable (AppContext.BaseDirectory).
+    /// Used as the root for resolving all application-relative paths.
+    /// </summary>
+    string ApplicationBaseDirectory { get; }
+
+    /// <summary>
+    /// Resolves an application path:
+    /// - If path is absolute, returns normalized absolute path.
+    /// - If path is relative, resolves it relative to ApplicationBaseDirectory (not process CWD).
+    /// </summary>
+    string ResolveApplicationPath(string path);
+
+    /// <summary>
     /// Directory containing user-level configuration files (config.json).
     /// </summary>
     string ConfigDirectory { get; }

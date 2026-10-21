@@ -15,14 +15,22 @@ public sealed class PigmentorAppPaths : IPigmentorAppPaths
     private const string DatabaseFileName = "pigmentor.db";
     private const string SecretsFileName = "secrets.dat";
 
+    public string ApplicationBaseDirectory { get; }
     public string ConfigDirectory { get; }
     public string DefaultRootPath { get; }
 
     public string ConfigFilePath => Path.Combine(ConfigDirectory, ConfigFileName);
     public string SecretsFilePath => Path.Combine(DefaultRootPath, SecretsFileName);
 
-    public PigmentorAppPaths(string? configDirectory = null, string? defaultRootPath = null)
+    public PigmentorAppPaths(
+        string? configDirectory = null,
+        string? defaultRootPath = null,
+        string? applicationBaseDirectory = null)
     {
+        ApplicationBaseDirectory = !string.IsNullOrWhiteSpace(applicationBaseDirectory)
+            ? Path.GetFullPath(applicationBaseDirectory)
+            : AppContext.BaseDirectory;
+
         if (!string.IsNullOrWhiteSpace(configDirectory) && !string.IsNullOrWhiteSpace(defaultRootPath))
         {
             ConfigDirectory = Path.GetFullPath(configDirectory);
@@ -38,7 +46,19 @@ public sealed class PigmentorAppPaths : IPigmentorAppPaths
 
         DefaultRootPath = !string.IsNullOrWhiteSpace(defaultRootPath)
             ? Path.GetFullPath(defaultRootPath)
-            : resolvedData;
+            : Path.Combine(ApplicationBaseDirectory, "data");
+    }
+
+    public string ResolveApplicationPath(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var trimmed = path.Trim();
+        if (Path.IsPathRooted(trimmed))
+        {
+            return Path.GetFullPath(trimmed);
+        }
+
+        return Path.GetFullPath(Path.Combine(ApplicationBaseDirectory, trimmed));
     }
 
     public string ResolveEffectiveRootPath(string? configuredRootPath)
@@ -48,7 +68,7 @@ public sealed class PigmentorAppPaths : IPigmentorAppPaths
             return DefaultRootPath;
         }
 
-        return Path.GetFullPath(configuredRootPath.Trim());
+        return ResolveApplicationPath(configuredRootPath);
     }
 
     public string GetDatabasePath(string rootPath)

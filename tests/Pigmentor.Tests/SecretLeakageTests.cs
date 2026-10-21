@@ -54,7 +54,8 @@ public sealed class SecretLeakageTests : IDisposable
 
         Assert.DoesNotContain(SyntheticSecret, json, StringComparison.Ordinal);
         Assert.DoesNotContain("secret", json, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("token", json, StringComparison.OrdinalIgnoreCase);
+        var jsonWithoutTokenizer = json.Replace("tokenizer", "", StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("token", jsonWithoutTokenizer, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("key", json, StringComparison.OrdinalIgnoreCase);
     }
 

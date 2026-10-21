@@ -44,7 +44,6 @@ public sealed class CliIngestAndRagTests : IDisposable
 
     public void Dispose()
     {
-        SqliteConnection.ClearAllPools();
         try
         {
             if (Directory.Exists(_tempDirectory))
@@ -54,7 +53,18 @@ public sealed class CliIngestAndRagTests : IDisposable
         }
         catch
         {
-            // Best effort cleanup
+            try
+            {
+                SqliteConnection.ClearAllPools();
+                if (Directory.Exists(_tempDirectory))
+                {
+                    Directory.Delete(_tempDirectory, recursive: true);
+                }
+            }
+            catch
+            {
+                // Best effort cleanup
+            }
         }
     }
 

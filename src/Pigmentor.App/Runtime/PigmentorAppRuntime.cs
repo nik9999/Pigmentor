@@ -22,13 +22,12 @@ namespace Pigmentor.App.Runtime;
 /// <summary>
 /// Composition root for Pigmentor applications.
 /// Assembles public abstractions, services, and storage without duplicating kernel logic.
-/// Explicitly manages the lifecycle of resources it creates.
+/// Clear single-owner resource lifecycle: DI container (ServiceProvider) owns and disposes all runtime-created services.
+/// External overrides are caller-owned and never disposed by the runtime.
 /// </summary>
 public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
 {
     private readonly ServiceProvider _serviceProvider;
-    private readonly List<IDisposable> _ownedDisposables;
-    private readonly List<IAsyncDisposable> _ownedAsyncDisposables;
     private bool _disposed;
 
     public IServiceProvider Services => _serviceProvider;
@@ -37,14 +36,9 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
     public IVectorStore VectorStore => _serviceProvider.GetRequiredService<IVectorStore>();
     public IIngestionStateStore StateStore => _serviceProvider.GetRequiredService<IIngestionStateStore>();
 
-    private PigmentorAppRuntime(
-        ServiceProvider serviceProvider,
-        List<IDisposable> ownedDisposables,
-        List<IAsyncDisposable> ownedAsyncDisposables)
+    private PigmentorAppRuntime(ServiceProvider serviceProvider)
     {
         _serviceProvider = serviceProvider;
-        _ownedDisposables = ownedDisposables;
-        _ownedAsyncDisposables = ownedAsyncDisposables;
     }
 
     /// <summary>
@@ -67,20 +61,19 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(credentialProvider);
         cancellationToken.ThrowIfCancellationRequested();
 
-        // 1. Validate configuration
-        var errors = PigmentorConfigManager.Validate(config);
+        var paths = appPaths ?? new PigmentorAppPaths();
+
+        // 1. Validate configuration against effective paths
+        var errors = PigmentorConfigManager.Validate(config, paths);
         if (errors.Count > 0)
         {
             throw new InvalidOperationException($"Invalid Pigmentor configuration:{Environment.NewLine}- " + string.Join(Environment.NewLine + "- ", errors));
         }
 
-        var paths = appPaths ?? new PigmentorAppPaths();
         var normalizedRoot = paths.ResolveEffectiveRootPath(config.RootPath);
         paths.EnsureWorkspaceDirectories(normalizedRoot);
         var dbPath = paths.GetDatabasePath(normalizedRoot);
 
-        var ownedDisposables = new List<IDisposable>();
-        var ownedAsyncDisposables = new List<IAsyncDisposable>();
         var services = new ServiceCollection();
 
         // Add logging (NullLogger by default)
@@ -119,10 +112,8 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
                 IgnoreSslValidation = config.GigaChat != null && !config.GigaChat.VerifySsl
             };
 
-            var gigaChatClient = new GigaChatClient(gigaChatOptions);
-            ownedDisposables.Add(gigaChatClient);
-            services.AddSingleton(gigaChatClient);
-            services.AddSingleton<IChatClient>(_ => gigaChatClient.GetChatClient(config.Chat.Model));
+            services.AddSingleton(_ => new GigaChatClient(gigaChatOptions));
+            services.AddSingleton<IChatClient>(sp => sp.GetRequiredService<GigaChatClient>().GetChatClient(config.Chat.Model));
         }
         else if (string.Equals(config.Chat.Provider, "Ollama", StringComparison.OrdinalIgnoreCase))
         {
@@ -133,9 +124,8 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
                 throw new InvalidOperationException($"Chat endpoint '{config.Chat.Endpoint}' is not a valid absolute HTTP or HTTPS URI.");
             }
 
-            var ollamaClient = new OllamaApiClient(endpointUri, config.Chat.Model);
-            ownedDisposables.Add(ollamaClient);
-            services.AddSingleton<IChatClient>(ollamaClient);
+            services.AddSingleton(_ => new OllamaApiClient(endpointUri, config.Chat.Model));
+            services.AddSingleton<IChatClient>(sp => sp.GetRequiredService<OllamaApiClient>());
         }
         else
         {
@@ -149,49 +139,54 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
         }
         else
         {
-            IEmbeddingGenerator<string, Embedding<float>>? generator = embeddingGeneratorOverride;
-
-            if (generator == null)
+            if (embeddingGeneratorOverride != null)
             {
-                if (string.Equals(config.Embeddings!.Provider, "Ollama", StringComparison.OrdinalIgnoreCase))
+                services.AddSingleton(embeddingGeneratorOverride);
+            }
+            else if (string.Equals(config.Embeddings!.Provider, "Ollama", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(config.Embeddings.Endpoint) ||
+                    !Uri.TryCreate(config.Embeddings.Endpoint, UriKind.Absolute, out var embUri) ||
+                    (embUri.Scheme != Uri.UriSchemeHttp && embUri.Scheme != Uri.UriSchemeHttps))
                 {
-                    if (string.IsNullOrWhiteSpace(config.Embeddings.Endpoint) ||
-                        !Uri.TryCreate(config.Embeddings.Endpoint, UriKind.Absolute, out var embUri) ||
-                        (embUri.Scheme != Uri.UriSchemeHttp && embUri.Scheme != Uri.UriSchemeHttps))
-                    {
-                        throw new InvalidOperationException($"Embeddings endpoint '{config.Embeddings.Endpoint}' is not a valid absolute HTTP or HTTPS URI.");
-                    }
-
-                    var ollamaEmbClient = new OllamaApiClient(embUri, config.Embeddings.Model);
-                    generator = ollamaEmbClient;
-                    ownedDisposables.Add(ollamaEmbClient);
+                    throw new InvalidOperationException($"Embeddings endpoint '{config.Embeddings.Endpoint}' is not a valid absolute HTTP or HTTPS URI.");
                 }
-                else if (string.Equals(config.Embeddings.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
+
+                services.AddSingleton(_ => new OllamaApiClient(embUri, config.Embeddings.Model));
+                services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp => sp.GetRequiredService<OllamaApiClient>());
+            }
+            else if (string.Equals(config.Embeddings.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(config.Embeddings.ModelPath))
                 {
-                    if (string.IsNullOrWhiteSpace(config.Embeddings.ModelPath))
-                    {
-                        throw new InvalidOperationException("ONNX embedding ModelPath is required when Provider is 'Onnx'.");
-                    }
-
-                    var onnxGen = new OnnxEmbeddingGenerator(
-                        config.Embeddings.ModelPath,
-                        config.Embeddings.TokenizerPath,
-                        config.Embeddings.Dimensions);
-
-                    generator = onnxGen;
-                    ownedDisposables.Add(onnxGen);
+                    throw new InvalidOperationException("ONNX embedding ModelPath is required when Provider is 'Onnx'.");
                 }
-                else
+
+                if (string.IsNullOrWhiteSpace(config.Embeddings.TokenizerPath))
                 {
-                    throw new NotSupportedException($"Unsupported embedding provider: '{config.Embeddings.Provider}'.");
+                    throw new InvalidOperationException("ONNX embedding TokenizerPath is required when Provider is 'Onnx'.");
                 }
+
+                var resolvedModel = paths.ResolveApplicationPath(config.Embeddings.ModelPath);
+                var resolvedTokenizer = paths.ResolveApplicationPath(config.Embeddings.TokenizerPath);
+
+                services.AddSingleton(_ => new OnnxEmbeddingGenerator(
+                    resolvedModel,
+                    resolvedTokenizer,
+                    config.Embeddings.Dimensions));
+                services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp => sp.GetRequiredService<OnnxEmbeddingGenerator>());
+            }
+            else
+            {
+                throw new NotSupportedException($"Unsupported embedding provider: '{config.Embeddings.Provider}'.");
             }
 
             var embeddingModelName = config.Embeddings!.Model ?? Path.GetFileNameWithoutExtension(config.Embeddings.ModelPath) ?? "default";
-            var embeddingService = new GeneratorEmbeddingService(generator, embeddingModelName, config.Embeddings.Dimensions);
-
-            services.AddSingleton(generator);
-            services.AddSingleton<IEmbeddingService>(embeddingService);
+            services.AddSingleton<IEmbeddingService>(sp =>
+            {
+                var generator = sp.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
+                return new GeneratorEmbeddingService(generator, embeddingModelName, config.Embeddings.Dimensions);
+            });
         }
 
         // 4. Storage setup (SQLite + sqlite-vec)
@@ -212,13 +207,7 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
                     Dimensions = emb.Dimensions,
                     EmbeddingModel = emb.EmbeddingModel
                 };
-                var store = new SqliteVecStore(opts);
-                lock (ownedDisposables)
-                {
-                    ownedDisposables.Add(store);
-                    ownedAsyncDisposables.Add(store);
-                }
-                return store;
+                return new SqliteVecStore(opts);
             });
         }
 
@@ -228,16 +217,7 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
         }
         else
         {
-            services.AddSingleton<IIngestionStateStore>(_ =>
-            {
-                var store = new SqliteIngestionStateStore(connectionString);
-                lock (ownedDisposables)
-                {
-                    ownedDisposables.Add(store);
-                    ownedAsyncDisposables.Add(store);
-                }
-                return store;
-            });
+            services.AddSingleton<IIngestionStateStore>(_ => new SqliteIngestionStateStore(connectionString));
         }
 
         // 5. Retrieval setup
@@ -259,10 +239,7 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
         services.AddSingleton<IDocumentIngestionService, DocumentIngestionService>();
 
         var provider = services.BuildServiceProvider();
-        ownedDisposables.Add(provider);
-        ownedAsyncDisposables.Add(provider);
-
-        return new PigmentorAppRuntime(provider, ownedDisposables, ownedAsyncDisposables);
+        return new PigmentorAppRuntime(provider);
     }
 
     public void Dispose()
@@ -272,18 +249,7 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
             return;
         }
 
-        for (var i = _ownedDisposables.Count - 1; i >= 0; i--)
-        {
-            try
-            {
-                _ownedDisposables[i].Dispose();
-            }
-            catch
-            {
-                // Best effort cleanup
-            }
-        }
-
+        _serviceProvider.Dispose();
         _disposed = true;
     }
 
@@ -294,18 +260,7 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
             return;
         }
 
-        for (var i = _ownedAsyncDisposables.Count - 1; i >= 0; i--)
-        {
-            try
-            {
-                await _ownedAsyncDisposables[i].DisposeAsync().ConfigureAwait(false);
-            }
-            catch
-            {
-                // Best effort cleanup
-            }
-        }
-
-        Dispose();
+        await _serviceProvider.DisposeAsync().ConfigureAwait(false);
+        _disposed = true;
     }
 }

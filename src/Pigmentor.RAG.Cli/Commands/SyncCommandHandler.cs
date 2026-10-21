@@ -10,6 +10,8 @@ namespace Pigmentor.RAG.Cli.Commands;
 
 public sealed class SyncCommandHandler
 {
+    public const string WorkspaceSyncSourceId = "workspace-sync";
+
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".pdf",
@@ -86,6 +88,34 @@ public sealed class SyncCommandHandler
         // Deterministic sort by file path
         discoveredItems.Sort((a, b) => string.Compare(a.FilePath, b.FilePath, StringComparison.OrdinalIgnoreCase));
 
+        await using var runtime = await _runtimeFactory(cancellationToken).ConfigureAwait(false);
+
+        // 3. Reconcile stale documents (files previously synced under "workspace-sync" but now removed from workspace)
+        var staleDeleted = 0;
+        var existingStates = await runtime.StateStore.ListAsync(WorkspaceSyncSourceId, cancellationToken).ConfigureAwait(false);
+        var activeDocIds = new HashSet<string>(
+            discoveredItems.Select(x => Path.GetRelativePath(rootPath, x.FilePath).Replace('\\', '/')),
+            StringComparer.Ordinal);
+
+        foreach (var state in existingStates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!activeDocIds.Contains(state.DocumentId))
+            {
+                _console.Write($"Removing stale document: {state.DocumentId} ... ");
+                var deleted = await runtime.IngestionService.DeleteAsync(state.DocumentId, sourceId: WorkspaceSyncSourceId, cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (deleted)
+                {
+                    _console.WriteLine("deleted");
+                    staleDeleted++;
+                }
+                else
+                {
+                    _console.WriteLine("not found");
+                }
+            }
+        }
+
         if (discoveredItems.Count == 0)
         {
             _console.WriteLine("No supported documents found in workspace silos.");
@@ -97,15 +127,17 @@ public sealed class SyncCommandHandler
             {
                 _console.WriteLine($"Skipped inaccessible paths: {inaccessibleCount}");
             }
+            if (staleDeleted > 0)
+            {
+                _console.WriteLine($"Deleted stale documents: {staleDeleted}");
+            }
             return 0;
         }
 
         _console.WriteLine($"Found {discoveredItems.Count} document(s) across silos (unsupported: {unsupportedCount}, inaccessible: {inaccessibleCount}).");
         _console.WriteLine();
 
-        // 3. Synchronize documents through ingestion service
-        await using var runtime = await _runtimeFactory(cancellationToken).ConfigureAwait(false);
-
+        // 4. Synchronize documents through ingestion service
         var succeeded = 0;
         var unchanged = 0;
         var failed = 0;
@@ -114,25 +146,24 @@ public sealed class SyncCommandHandler
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var relativePath = Path.GetRelativePath(rootPath, filePath);
+            var relativePath = Path.GetRelativePath(rootPath, filePath).Replace('\\', '/');
             _console.Write($"Syncing: [{silo}] {relativePath} ... ");
 
-            var docId = Path.GetFileNameWithoutExtension(filePath);
+            // Deterministic workspace document identity derived from normalized relative path
+            var docId = relativePath;
             var metadata = new DocumentMetadata(
                 Id: docId,
                 Silo: silo,
-                Department: "Engineering",
-                Office: "Main",
-                ConfidentialityLevel: "Internal",
-                DocumentType: "Manual",
-                FiscalYear: DateTime.UtcNow.Year,
-                Author: "System",
                 LastModified: DateOnly.FromDateTime(File.GetLastWriteTimeUtc(filePath)),
-                Title: docId);
+                Title: Path.GetFileNameWithoutExtension(filePath));
 
             try
             {
-                var result = await runtime.IngestionService.IngestFileAsync(filePath, metadata, cancellationToken: cancellationToken).ConfigureAwait(false);
+                var result = await runtime.IngestionService.IngestFileAsync(
+                    filePath,
+                    metadata,
+                    sourceId: WorkspaceSyncSourceId,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
 
                 if (result.Skipped)
                 {
@@ -168,6 +199,7 @@ public sealed class SyncCommandHandler
         _console.WriteLine($"  Succeeded:            {succeeded}");
         _console.WriteLine($"  Unchanged:            {unchanged}");
         _console.WriteLine($"  Failed:               {failed}");
+        _console.WriteLine($"  Deleted stale:        {staleDeleted}");
         _console.WriteLine($"  Skipped unsupported:  {unsupportedCount}");
         _console.WriteLine($"  Skipped inaccessible: {inaccessibleCount}");
 
@@ -227,4 +259,3 @@ public sealed class SyncCommandHandler
         }
     }
 }
-

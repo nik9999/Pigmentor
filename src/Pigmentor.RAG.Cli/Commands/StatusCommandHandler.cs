@@ -40,7 +40,7 @@ public sealed class StatusCommandHandler
             return 2;
         }
 
-        var validationErrors = PigmentorConfigManager.Validate(config);
+        var validationErrors = PigmentorConfigManager.Validate(config, _paths, validateFilesExist: false);
         if (validationErrors.Count > 0)
         {
             _console.WriteError("Configuration Validation Errors:");
@@ -77,8 +77,14 @@ public sealed class StatusCommandHandler
         _console.WriteLine($"  Provider:         {config.Embeddings!.Provider}");
         if (string.Equals(config.Embeddings.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
         {
-            _console.WriteLine($"  Model Path:       {config.Embeddings.ModelPath}");
-            _console.WriteLine($"  Tokenizer Path:   {config.Embeddings.TokenizerPath ?? "(none)"}");
+            var resolvedModel = !string.IsNullOrWhiteSpace(config.Embeddings.ModelPath)
+                ? _paths.ResolveApplicationPath(config.Embeddings.ModelPath)
+                : "(none)";
+            var resolvedTok = !string.IsNullOrWhiteSpace(config.Embeddings.TokenizerPath)
+                ? _paths.ResolveApplicationPath(config.Embeddings.TokenizerPath)
+                : "(none)";
+            _console.WriteLine($"  Model Path:       {config.Embeddings.ModelPath} (resolved: {resolvedModel})");
+            _console.WriteLine($"  Tokenizer Path:   {config.Embeddings.TokenizerPath ?? "(none)"} (resolved: {resolvedTok})");
         }
         else
         {
@@ -194,13 +200,32 @@ public sealed class StatusCommandHandler
         else if (string.Equals(config.Embeddings.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
         {
             _console.Write("  Embeddings (ONNX file validation): ");
-            if (File.Exists(config.Embeddings.ModelPath))
+            var modelResolved = !string.IsNullOrWhiteSpace(config.Embeddings.ModelPath)
+                ? _paths.ResolveApplicationPath(config.Embeddings.ModelPath)
+                : null;
+            var tokResolved = !string.IsNullOrWhiteSpace(config.Embeddings.TokenizerPath)
+                ? _paths.ResolveApplicationPath(config.Embeddings.TokenizerPath)
+                : null;
+
+            var modelExists = modelResolved != null && File.Exists(modelResolved);
+            var tokExists = tokResolved != null && File.Exists(tokResolved);
+
+            if (modelExists && tokExists)
             {
-                _console.WriteLine("OK (model file exists)");
+                _console.WriteLine("OK (model and tokenizer files exist)");
             }
             else
             {
-                _console.WriteLine($"FAILED (model file '{config.Embeddings.ModelPath}' not found)");
+                var missing = new List<string>();
+                if (!modelExists)
+                {
+                    missing.Add($"model file '{config.Embeddings.ModelPath}' (resolved: '{modelResolved}') not found");
+                }
+                if (!tokExists)
+                {
+                    missing.Add($"tokenizer file '{config.Embeddings.TokenizerPath}' (resolved: '{tokResolved}') not found");
+                }
+                _console.WriteLine($"FAILED ({string.Join(", ", missing)})");
                 allHealthy = false;
             }
         }

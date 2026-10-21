@@ -14,6 +14,9 @@
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.6" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Tokenizers.DotNet" Version="1.4.1" />
+    <PackageReference Include="Tokenizers.DotNet.runtime.linux-x64" Version="1.4.1" />
+    <PackageReference Include="Tokenizers.DotNet.runtime.win-x64" Version="1.4.1" />
   </ItemGroup>
 
   <ItemGroup>

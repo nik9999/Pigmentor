@@ -1,0 +1,56 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    { "id": 0, "content": "<s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+    { "id": 1, "content": "<pad>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+    { "id": 2, "content": "</s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+    { "id": 3, "content": "<unk>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+    { "id": 4, "content": "RS-485", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false },
+    { "id": 5, "content": "Modbus", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false },
+    { "id": 6, "content": "TCP", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false },
+    { "id": 7, "content": "Holding", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false },
+    { "id": 8, "content": "Register", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false },
+    { "id": 9, "content": "40001", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false },
+    { "id": 10, "content": "4-20", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false },
+    { "id": 11, "content": "mA", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false },
+    { "id": 12, "content": "115200", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Whitespace"
+  },
+  "post_processor": null,
+  "decoder": null,
+  "model": {
+    "type": "WordLevel",
+    "unk_token": "<unk>",
+    "vocab": {
+      "<s>": 0,
+      "<pad>": 1,
+      "</s>": 2,
+      "<unk>": 3,
+      "RS-485": 4,
+      "Modbus": 5,
+      "TCP": 6,
+      "Holding": 7,
+      "Register": 8,
+      "40001": 9,
+      "4-20": 10,
+      "mA": 11,
+      "115200": 12,
+      "Как": 13,
+      "настроить": 14,
+      "оформить": 15,
+      "отпуск": 16,
+      "сотруднику?": 17,
+      "Какой": 18,
+      "тип": 19,
+      "у": 20,
+      "40001?": 21,
+      "RS-485?": 22
+    }
+  }
+}
+

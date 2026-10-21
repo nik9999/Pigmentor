@@ -35,7 +35,6 @@ public sealed class WorkspaceAndSyncTests : IDisposable
 
     public void Dispose()
     {
-        SqliteConnection.ClearAllPools();
         try
         {
             if (Directory.Exists(_tempDirectory))
@@ -45,7 +44,18 @@ public sealed class WorkspaceAndSyncTests : IDisposable
         }
         catch
         {
-            // Best effort cleanup
+            try
+            {
+                SqliteConnection.ClearAllPools();
+                if (Directory.Exists(_tempDirectory))
+                {
+                    Directory.Delete(_tempDirectory, recursive: true);
+                }
+            }
+            catch
+            {
+                // Best effort cleanup
+            }
         }
     }
 
@@ -211,5 +221,141 @@ public sealed class WorkspaceAndSyncTests : IDisposable
 
         var syncHandler = new SyncCommandHandler(_paths, _configManager, CreateTestRuntimeAsync, new TestConsoleIO());
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => syncHandler.ExecuteAsync(cts.Token));
+    }
+
+    [Fact]
+    public void WorkspacePathResolver_IsIndependentOfCurrentWorkingDirectory()
+    {
+        var appBase = Path.Combine(_tempDirectory, "app_base");
+        Directory.CreateDirectory(appBase);
+        var dirA = Path.Combine(_tempDirectory, "cwd_a");
+        var dirB = Path.Combine(_tempDirectory, "cwd_b");
+        Directory.CreateDirectory(dirA);
+        Directory.CreateDirectory(dirB);
+
+        var originalCwd = Environment.CurrentDirectory;
+        try
+        {
+            var paths = new PigmentorAppPaths(
+                configDirectory: Path.Combine(appBase, "config"),
+                defaultRootPath: Path.Combine(appBase, "data"),
+                applicationBaseDirectory: appBase);
+
+            Environment.CurrentDirectory = dirA;
+            var rootFromA = paths.ResolveEffectiveRootPath("data");
+            var modelFromA = paths.ResolveApplicationPath("models/bge-m3/model.onnx");
+            var tokFromA = paths.ResolveApplicationPath("models/bge-m3/tokenizer.json");
+            var dbFromA = paths.GetDatabasePath("data");
+
+            Environment.CurrentDirectory = dirB;
+            var rootFromB = paths.ResolveEffectiveRootPath("data");
+            var modelFromB = paths.ResolveApplicationPath("models/bge-m3/model.onnx");
+            var tokFromB = paths.ResolveApplicationPath("models/bge-m3/tokenizer.json");
+            var dbFromB = paths.GetDatabasePath("data");
+
+            Assert.Equal(Path.Combine(appBase, "data"), rootFromA);
+            Assert.Equal(Path.Combine(appBase, "data"), rootFromB);
+            Assert.Equal(rootFromA, rootFromB);
+
+            Assert.Equal(Path.Combine(appBase, "models", "bge-m3", "model.onnx"), modelFromA);
+            Assert.Equal(modelFromA, modelFromB);
+
+            Assert.Equal(Path.Combine(appBase, "models", "bge-m3", "tokenizer.json"), tokFromA);
+            Assert.Equal(tokFromA, tokFromB);
+
+            Assert.Equal(Path.Combine(appBase, "data", "pigmentor.db"), dbFromA);
+            Assert.Equal(dbFromA, dbFromB);
+        }
+        finally
+        {
+            Environment.CurrentDirectory = originalCwd;
+        }
+    }
+
+    [Fact]
+    public async Task SyncCommand_PreventsDocumentIdCollision_ForSameFileNamesInDifferentDirectories()
+    {
+        // 1. Initialize workspace
+        var initConsole = new TestConsoleIO();
+        var initHandler = new InitCommandHandler(_paths, _configManager, initConsole);
+        await initHandler.ExecuteAsync();
+
+        // 2. Create two files with the identical file name 'config.txt' in two different directories within technical-docs
+        var techSilo = Path.Combine(_tempDirectory, "technical-docs");
+        var modbusDir = Path.Combine(techSilo, "modbus");
+        var rs485Dir = Path.Combine(techSilo, "rs485");
+        Directory.CreateDirectory(modbusDir);
+        Directory.CreateDirectory(rs485Dir);
+
+        var file1 = MultiFormatFixtureFiles.CreateTxt(modbusDir, "config.txt", "Настройки протокола Modbus: адрес 1, скорость 9600.");
+        var file2 = MultiFormatFixtureFiles.CreateTxt(rs485Dir, "config.txt", "Настройки интерфейса RS-485: полудуплекс, терминатор 120 Ом.");
+
+        // 3. Synchronize
+        var syncConsole = new TestConsoleIO();
+        var syncHandler = new SyncCommandHandler(_paths, _configManager, CreateTestRuntimeAsync, syncConsole);
+        var exitCode = await syncHandler.ExecuteAsync();
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Succeeded:            2", syncConsole.Output, StringComparison.Ordinal);
+
+        // 4. Verify in StateStore and VectorStore: both documents exist distinctly without collision
+        await using var runtime = await CreateTestRuntimeAsync(CancellationToken.None);
+        var states = await runtime.StateStore.ListAsync(SyncCommandHandler.WorkspaceSyncSourceId);
+
+        var docIds = states.Select(s => s.DocumentId).ToList();
+        Assert.Equal(2, docIds.Count);
+        Assert.Contains("technical-docs/modbus/config.txt", docIds);
+        Assert.Contains("technical-docs/rs485/config.txt", docIds);
+        Assert.NotEqual(docIds[0], docIds[1]);
+    }
+
+    [Fact]
+    public async Task SyncCommand_ReconcilesStaleDocuments_WhenDeletedFromWorkspace()
+    {
+        // 1. Initialize workspace
+        var initHandler = new InitCommandHandler(_paths, _configManager, new TestConsoleIO());
+        await initHandler.ExecuteAsync();
+
+        // 2. Populate two documents in silos
+        var techSilo = Path.Combine(_tempDirectory, "technical-docs");
+        var hrSilo = Path.Combine(_tempDirectory, "hr-policies");
+
+        var techFile = MultiFormatFixtureFiles.CreateTxt(techSilo, "active_guide.txt", "Руководство по эксплуатации датчиков температуры.");
+        var hrFile = MultiFormatFixtureFiles.CreateTxt(hrSilo, "temporary_rules.txt", "Временные правила внутреннего распорядка.");
+
+        // 3. First sync: both ingested
+        var console1 = new TestConsoleIO();
+        var handler1 = new SyncCommandHandler(_paths, _configManager, CreateTestRuntimeAsync, console1);
+        var code1 = await handler1.ExecuteAsync();
+        Assert.Equal(0, code1);
+        Assert.Contains("Succeeded:            2", console1.Output, StringComparison.Ordinal);
+
+        await using (var runtime1 = await CreateTestRuntimeAsync(CancellationToken.None))
+        {
+            var states1 = await runtime1.StateStore.ListAsync(SyncCommandHandler.WorkspaceSyncSourceId);
+            Assert.Equal(2, states1.Count);
+        }
+
+        // 4. Delete one source file from disk
+        File.Delete(hrFile);
+
+        // 5. Second sync: reconciles and deletes stale document from index and state
+        var console2 = new TestConsoleIO();
+        var handler2 = new SyncCommandHandler(_paths, _configManager, CreateTestRuntimeAsync, console2);
+        var code2 = await handler2.ExecuteAsync();
+        Assert.Equal(0, code2);
+
+        var output2 = console2.Output;
+        Assert.Contains("Removing stale document: hr-policies/temporary_rules.txt ... deleted", output2, StringComparison.Ordinal);
+        Assert.Contains("Deleted stale:        1", output2, StringComparison.Ordinal);
+        Assert.Contains("Unchanged:            1", output2, StringComparison.Ordinal);
+
+        // 6. Verify in StateStore: only the active document remains
+        await using (var runtime2 = await CreateTestRuntimeAsync(CancellationToken.None))
+        {
+            var states2 = await runtime2.StateStore.ListAsync(SyncCommandHandler.WorkspaceSyncSourceId);
+            Assert.Single(states2);
+            Assert.Equal("technical-docs/active_guide.txt", states2[0].DocumentId);
+        }
     }
 }

@@ -5,8 +5,10 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 namespace Pigmentor.App.Runtime;
 
 /// <summary>
-/// Local ONNX embedding generator executing transformer models (e.g. BGE-M3) on CPU.
+/// Local ONNX embedding generator executing transformer models (specifically BGE-M3 dense embeddings) on CPU.
 /// Implements Microsoft.Extensions.AI <see cref="IEmbeddingGenerator{TInput, TEmbedding}"/>.
+/// Tokenization is strictly performed using real Hugging Face tokenizers (no fake hash-tokenizers).
+/// Dense embeddings use CLS pooling ([0, 0, :]) with L2 normalization producing exact 1024-dimensional vectors.
 /// </summary>
 public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embedding<float>>, IDisposable
 {
@@ -14,6 +16,8 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
     private readonly int _dimensions;
     private readonly InferenceSession _session;
     private readonly bool _disposeSession;
+    private readonly IOnnxTokenizer _tokenizer;
+    private readonly bool _disposeTokenizer;
     private bool _disposed;
 
     public EmbeddingGeneratorMetadata Metadata { get; }
@@ -21,8 +25,9 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
     public OnnxEmbeddingGenerator(
         string modelPath,
         string? tokenizerPath = null,
-        int dimensions = 768,
-        InferenceSession? sessionOverride = null)
+        int dimensions = 1024,
+        InferenceSession? sessionOverride = null,
+        IOnnxTokenizer? tokenizerOverride = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelPath);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(dimensions);
@@ -45,6 +50,24 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
             var options = new SessionOptions();
             _session = new InferenceSession(_modelPath, options);
             _disposeSession = true;
+        }
+
+        if (tokenizerOverride != null)
+        {
+            _tokenizer = tokenizerOverride;
+            _disposeTokenizer = false;
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(tokenizerPath))
+            {
+                throw new ArgumentException(
+                    "ONNX tokenizerPath must be specified when using OnnxEmbeddingGenerator. Fake/hash tokenizers are not permitted.",
+                    nameof(tokenizerPath));
+            }
+
+            _tokenizer = new HuggingFaceOnnxTokenizer(tokenizerPath);
+            _disposeTokenizer = true;
         }
 
         Metadata = new EmbeddingGeneratorMetadata("onnx", null, Path.GetFileNameWithoutExtension(_modelPath), dimensions);
@@ -79,9 +102,7 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
 
     private ReadOnlyMemory<float> InferSingleText(string text)
     {
-        // Simple word-hash whitespace tokenization fallback if tokenizer bundle is not present,
-        // producing a valid sequence tensor for ONNX transformer embeddings
-        var tokens = Tokenize(text);
+        var tokens = _tokenizer.Tokenize(text);
         var seqLength = Math.Max(tokens.Length, 1);
 
         var inputIds = new DenseTensor<long>(new[] { 1, seqLength });
@@ -89,8 +110,8 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
 
         for (var i = 0; i < seqLength; i++)
         {
-            inputIds[0, i] = i < tokens.Length ? tokens[i] : 0;
-            attentionMask[0, i] = 1;
+            inputIds[0, i] = i < tokens.Length ? tokens[i] : 0L;
+            attentionMask[0, i] = 1L;
         }
 
         var inputs = new List<NamedOnnxValue>();
@@ -98,31 +119,84 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
         foreach (var inputNode in _session.InputMetadata)
         {
             var name = inputNode.Key.ToLowerInvariant();
+            var isInt32 = inputNode.Value.ElementType == typeof(int);
+
             if (name.Contains("mask"))
             {
-                inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, attentionMask));
+                if (isInt32)
+                {
+                    var mask32 = new DenseTensor<int>(new[] { 1, seqLength });
+                    for (var i = 0; i < seqLength; i++)
+                    {
+                        mask32[0, i] = 1;
+                    }
+
+                    inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, mask32));
+                }
+                else
+                {
+                    inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, attentionMask));
+                }
             }
             else if (name.Contains("token_type") || name.Contains("type_ids"))
             {
-                var typeIds = new DenseTensor<long>(new[] { 1, seqLength });
-                inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, typeIds));
+                if (isInt32)
+                {
+                    var type32 = new DenseTensor<int>(new[] { 1, seqLength });
+                    inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, type32));
+                }
+                else
+                {
+                    var type64 = new DenseTensor<long>(new[] { 1, seqLength });
+                    inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, type64));
+                }
             }
             else
             {
-                inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, inputIds));
+                if (isInt32)
+                {
+                    var ids32 = new DenseTensor<int>(new[] { 1, seqLength });
+                    for (var i = 0; i < seqLength; i++)
+                    {
+                        ids32[0, i] = (int)inputIds[0, i];
+                    }
+
+                    inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, ids32));
+                }
+                else
+                {
+                    inputs.Add(NamedOnnxValue.CreateFromTensor(inputNode.Key, inputIds));
+                }
             }
         }
 
         using var outputs = _session.Run(inputs);
-        var primaryOutput = outputs.Count > 0 ? outputs[0] : throw new InvalidOperationException("ONNX model produced no output tensors.");
+        if (outputs.Count == 0)
+        {
+            throw new InvalidOperationException("ONNX model produced no output tensors.");
+        }
 
-        var vector = ExtractAndPoolVector(primaryOutput, seqLength);
+        // Identify primary output: prefer dense_vecs / sentence_embedding if exported, otherwise first tensor
+        DisposableNamedOnnxValue? selectedOutput = null;
+        foreach (var output in outputs)
+        {
+            var outName = output.Name.ToLowerInvariant();
+            if (outName.Contains("sentence_embedding") || outName.Contains("dense_vecs"))
+            {
+                selectedOutput = output;
+                break;
+            }
+        }
+
+        selectedOutput ??= outputs[0];
+
+        var vector = ExtractAndPoolVector(selectedOutput);
         NormalizeL2(vector);
 
         return vector;
     }
 
-    private float[] ExtractAndPoolVector(DisposableNamedOnnxValue outputValue, int seqLength)
+    private float[] ExtractAndPoolVector(DisposableNamedOnnxValue outputValue)
     {
         var tensor = outputValue.AsTensor<float>();
         var dims = tensor.Dimensions;
@@ -130,29 +204,39 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
 
         if (dims.Length == 2)
         {
-            // [batch, dim]
-            var outputDim = Math.Min(_dimensions, dims[1]);
-            for (var d = 0; d < outputDim; d++)
+            // Shape: [batch, dimensions]
+            var outputDim = dims[1];
+            if (outputDim != _dimensions)
+            {
+                throw new InvalidOperationException(
+                    $"Configured embedding dimensions: {_dimensions}\nONNX model output dimensions: {outputDim}\nConfiguration/model mismatch.");
+            }
+
+            for (var d = 0; d < _dimensions; d++)
             {
                 vector[d] = tensor[0, d];
             }
         }
         else if (dims.Length == 3)
         {
-            // [batch, seq_len, dim] -> Mean pooling over sequence length
-            var outputDim = Math.Min(_dimensions, dims[2]);
-            for (var s = 0; s < seqLength; s++)
+            // Shape: [batch, seq_len, dimensions]
+            var outputDim = dims[2];
+            if (outputDim != _dimensions)
             {
-                for (var d = 0; d < outputDim; d++)
-                {
-                    vector[d] += tensor[0, s, d];
-                }
+                throw new InvalidOperationException(
+                    $"Configured embedding dimensions: {_dimensions}\nONNX model output dimensions: {outputDim}\nConfiguration/model mismatch.");
             }
 
-            for (var d = 0; d < outputDim; d++)
+            // BGE-M3 Dense Embedding Contract: CLS token pooling (first token [0, 0, :])
+            for (var d = 0; d < _dimensions; d++)
             {
-                vector[d] /= seqLength;
+                vector[d] = tensor[0, 0, d];
             }
+        }
+        else
+        {
+            throw new InvalidOperationException(
+                $"Unsupported ONNX model output rank: {dims.Length}. Expected 2D [batch, dim] or 3D [batch, seq_len, dim].");
         }
 
         return vector;
@@ -176,27 +260,6 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
         }
     }
 
-    private static long[] Tokenize(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return [101, 102]; // CLS, SEP standard tokens
-        }
-
-        var words = text.Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
-        var tokens = new List<long>(words.Length + 2) { 101 };
-
-        foreach (var word in words)
-        {
-            // Deterministic hash mapping into typical vocab range [1000..30000]
-            var hash = (long)Math.Abs(word.GetHashCode(StringComparison.Ordinal)) % 29000 + 1000;
-            tokens.Add(hash);
-        }
-
-        tokens.Add(102);
-        return tokens.ToArray();
-    }
-
     public object? GetService(Type serviceType, object? serviceKey = null)
     {
         if (serviceType == typeof(EmbeddingGeneratorMetadata))
@@ -217,6 +280,11 @@ public sealed class OnnxEmbeddingGenerator : IEmbeddingGenerator<string, Embeddi
         if (_disposeSession)
         {
             _session.Dispose();
+        }
+
+        if (_disposeTokenizer)
+        {
+            _tokenizer.Dispose();
         }
 
         _disposed = true;

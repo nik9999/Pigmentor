@@ -39,43 +39,40 @@ Pigmentor supports 4 core provider combinations for chat and embeddings:
 3. **Ollama Chat + Local ONNX Embeddings** (e.g. BGE-M3 ONNX runtime)
 4. **GigaChat + Local ONNX Embeddings**
 
-### Configuration (`config.json`)
+### Target Runtime Configuration (`config.json`)
 
-Configuration is stored in `<appData>/config.json` without secrets:
+Configuration is stored in user application data (`%APPDATA%/Pigmentor/config.json` on Windows, `~/.config/pigmentor/config.json` on Linux) strictly without secrets:
 
 ```json
 {
-  "rootPath": "D:\\PigmentorData",
+  "rootPath": "data",
   "chat": {
     "provider": "Ollama",
-    "model": "llama3.2",
-    "endpoint": "http://localhost:11434"
+    "model": "gigachat3-32k:latest",
+    "endpoint": "http://192.168.215.17:11434"
   },
-  "embeddings": {
-    "provider": "Ollama",
-    "model": "nomic-embed-text",
-    "endpoint": "http://localhost:11434",
-    "dimensions": 768
-  },
-  "gigachat": {
-    "scope": "GIGACHAT_API_PERS",
-    "verifySsl": true
-  }
-}
-```
-
-For local ONNX embeddings:
-
-```json
-{
   "embeddings": {
     "provider": "Onnx",
-    "modelPath": "/models/bge-m3.onnx",
-    "tokenizerPath": "/models/tokenizer.json",
+    "modelPath": "models/bge-m3/model.onnx",
+    "tokenizerPath": "models/bge-m3/tokenizer.json",
     "dimensions": 1024
   }
 }
 ```
+
+> [!NOTE]
+> **Deterministic Application Path Policy:**
+> All relative application paths (`rootPath`, `embeddings.modelPath`, `embeddings.tokenizerPath`) are resolved against `AppContext.BaseDirectory` (the application / executable directory), **NOT** the shell's current working directory (`Environment.CurrentDirectory`).
+> For instance, `rootPath = "data"` reliably resolves to `<AppContext.BaseDirectory>/data` and SQLite database to `<AppContext.BaseDirectory>/data/pigmentor.db` regardless of the shell directory from which `pigmentor` is launched.
+
+### BGE-M3 ONNX Artifact Contract
+
+Pigmentor's ONNX embedding pipeline natively integrates BGE-M3 dense embeddings:
+- **Tokenizer**: Real Hugging Face tokenizer loaded directly from `tokenizerPath` (`tokenizer.json` format) via `Tokenizers.DotNet` (SentencePiece / XLM-RoBERTa vocabulary, NFKC normalization, whitespace / byte-level pre-tokenization). There is **no hash-tokenizer fallback**.
+- **Graph Inputs**: `input_ids` and `attention_mask` (INT64 or INT32 tensors, `[batch, sequence_length]`), with optional `token_type_ids` if required by the exported graph.
+- **Graph Outputs & Pooling**: Evaluates `sentence_embedding` / `dense_vecs` (2D tensor `[batch, 1024]`) or `last_hidden_state` (3D tensor `[batch, sequence_length, 1024]`). For 3D representations, dense embeddings use CLS token pooling (first token `[0, 0, :]`).
+- **Normalization**: Strict L2 normalization ($||v||_2 = 1.0$).
+- **Dimensionality**: Strictly 1024 dimensions. Runtime checks enforce exact dimensionality match against configured dimensions and reject mismatches immediately without silent truncation or padding.
 
 ## Workspace & Document Silos
 
