@@ -161,9 +161,14 @@ public sealed class DogfoodingCorrectiveHardeningTests
         // 3. Legitimate insufficient context answer without citations => satisfied
         var clientInsufficient = new FakeStaticChatClient("В предоставленном контексте недостаточно информации.");
         var pipeline3 = new RagPipeline(retriever, clientInsufficient);
-        var response3 = await pipeline3.AskAsync("Сколько каналов?");
+        var response3 = await pipeline3.AskAsync("Какая гарантия у прибора?");
 
         Assert.True(response3.Diagnostics.RequiredCitationsSatisfied);
+
+        // 4. False insufficient context answer when evidence is present => unsatisfied
+        var response4 = await pipeline3.AskAsync("Сколько каналов?");
+
+        Assert.False(response4.Diagnostics.RequiredCitationsSatisfied);
     }
 
     [Fact]

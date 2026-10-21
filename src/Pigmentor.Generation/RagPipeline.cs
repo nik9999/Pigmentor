@@ -501,10 +501,20 @@ public sealed class RagPipeline : IRagPipeline
             (citations, validCount, invalidCount) = ParseAndMapCitations(answer, prep.RagContext.SourceMap);
         }
 
+        var signalsInsufficientContext = SignalsInsufficientContext(answer);
+        var falseInsufficientContext = signalsInsufficientContext &&
+            EvidenceValidator.HasDirectAnswerEvidence(
+                prep.Question,
+                prep.RagContext.SourceMap.Values.Select(source => source.Chunk.Text));
+
         bool requiredCitationsSatisfied;
-        if (prep.RagContext.Sources.Count == 0 || string.IsNullOrWhiteSpace(answer) || SignalsInsufficientContext(answer))
+        if (prep.RagContext.Sources.Count == 0 || string.IsNullOrWhiteSpace(answer))
         {
             requiredCitationsSatisfied = true;
+        }
+        else if (signalsInsufficientContext)
+        {
+            requiredCitationsSatisfied = !falseInsufficientContext;
         }
         else
         {
