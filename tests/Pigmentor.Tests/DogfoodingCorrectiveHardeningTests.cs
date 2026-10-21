@@ -217,6 +217,7 @@ public sealed class DogfoodingCorrectiveHardeningTests
     [InlineData("Выведи по каталогу цены на оборудование")]
     [InlineData("Какой товар имеет наибольший гарантийный срок?")]
     [InlineData("Сколько единиц оборудования есть на складе?")]
+    [InlineData("На каком складе больше всего PR-10 и сколько единиц?")]
     public void QueryScopeResolver_ResolvesProductCatalogScope_ForExplicitCatalogQueries(string query)
     {
         var filter = QueryScopeResolver.ResolveScope(query);
@@ -317,6 +318,55 @@ public sealed class DogfoodingCorrectiveHardeningTests
     }
 
     [Fact]
+    public void EvidenceValidator_ChannelCountAndCurrentRanges_RejectsWrongOrIncompleteAnswer()
+    {
+        var meta = new DocumentMetadata("mds-table", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
+        var snippet = """
+            | Параметр | Диапазон | Единица |
+            | --- | --- | --- |
+            | Число каналов ввода | 8 | шт. |
+            | Ток | (-20…+20) | мА |
+            | Ток | (0…20) | мА |
+            | Ток | (4…20) | мА |
+            | Напряжение | (0…10) | В |
+            """;
+        var citation = new Citation(1, "mds-table", "mds-table#1", "MDS AI-8UI", snippet, meta);
+        var question = "Сколько каналов у MDS AI-8UI и какие диапазоны тока он поддерживает?";
+
+        var wrong = EvidenceValidator.ValidateEvidenceWithReason(
+            "MDS AI-8UI имеет 16 каналов; ток: (-20…+20) мА, (0…20) мА, (0…10) мА [S1].", [citation], question);
+        Assert.False(wrong.IsValid);
+        Assert.Contains("Число каналов", wrong.Reason);
+
+        var incomplete = EvidenceValidator.ValidateEvidenceWithReason(
+            "MDS AI-8UI имеет 8 каналов; ток: (-20…+20) мА, (0…20) мА [S1].", [citation], question);
+        Assert.False(incomplete.IsValid);
+        Assert.Contains("не все запрошенные диапазоны", incomplete.Reason);
+
+        var correct = EvidenceValidator.ValidateEvidenceWithReason(
+            "MDS AI-8UI имеет 8 каналов; ток: (-20…+20) мА, (0…20) мА, (4…20) мА [S1].", [citation], question);
+        Assert.True(correct.IsValid, correct.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_VoltageRangeEnumeration_RequiresEveryTableRow()
+    {
+        var meta = new DocumentMetadata("mds-voltage", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
+        var snippet = """
+            | Параметр | Диапазон | Единица |
+            | --- | --- | --- |
+            | Напряжение | (-5…+5) | В |
+            | Напряжение | (0…10) | В |
+            """;
+        var citation = new Citation(1, "mds-voltage", "mds-voltage#1", "MDS AI-8UI", snippet, meta);
+        var result = EvidenceValidator.ValidateEvidenceWithReason(
+            "Поддерживается диапазон (0…10) В [S1].", [citation], "Какие диапазоны напряжения поддерживает MDS AI-8UI?");
+
+        Assert.False(result.IsValid);
+        Assert.Contains("-5…5 в", result.Reason);
+    }
+
+    [Fact]
     public void EvidenceValidator_VoltageTolerance_RecognizesMaintenanceAndRejectsEmergencyLimits()
     {
         var meta = new DocumentMetadata("docx1", Silo: "technical-docs", "", "", "", "Regulation", 2026, "", DateOnly.MinValue, "PX-400");
@@ -351,6 +401,25 @@ public sealed class DogfoodingCorrectiveHardeningTests
 
         // Negative test: answer claims incorrect tolerance 24 В ±20% citing Table 1 -> must fail
         Assert.False(EvidenceValidator.ValidateEvidence("Напряжение питания: 24 В ±20% [S1].", [maintCitation]));
+    }
+
+    [Fact]
+    public void EvidenceValidator_MaintenanceVoltageQuestion_RequiresNominalTolerance()
+    {
+        var meta = new DocumentMetadata("px-maint", Silo: "technical-docs", "", "", "", "Regulation", 2026, "", DateOnly.MinValue, "PX-400");
+        var snippet = """
+            Плановое обслуживание: проверить напряжение питания 24 В ±10 % постоянного тока.
+            Аварийные условия: эксплуатация запрещена ниже 20 В или выше 28 В.
+            """;
+        var citation = new Citation(1, "px-maint", "px-maint#1", "PX-400", snippet, meta);
+        var question = "Какое напряжение питания необходимо проверить при плановом обслуживании PX-400?";
+
+        var emergency = EvidenceValidator.ValidateEvidenceWithReason("Необходимо проверить пределы 20 В и 28 В [S1].", [citation], question);
+        Assert.False(emergency.IsValid);
+        Assert.Contains("24 В ±10 %", emergency.Reason);
+
+        var nominal = EvidenceValidator.ValidateEvidenceWithReason("Необходимо проверить напряжение 24 В ±10 % [S1].", [citation], question);
+        Assert.True(nominal.IsValid, nominal.Reason);
     }
 
     [Fact]
@@ -558,6 +627,53 @@ public sealed class DogfoodingCorrectiveHardeningTests
         var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(suboptimalAnswer, [citation], question);
         Assert.False(isValid);
         Assert.Contains("extremum violation", reason);
+    }
+
+    [Fact]
+    public void TableExtremum_FilteredWarranty_RejectsNonWinningCatalogItem()
+    {
+        var meta = new DocumentMetadata("catalog-warranty", Silo: "product-catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Интерфейс | Гарантия, мес. |
+            | --- | --- | --- |
+            | TM-200 | RS-485 / Modbus RTU | 24 |
+            | PR-25 | RS-485 / Modbus RTU | 18 |
+            | AI-8X | RS-485 / Modbus RTU | 36 |
+            | TM-100 | 4-20 mA | 24 |
+            """;
+        var citation = new Citation(1, "catalog-warranty", "catalog-warranty#1", "Catalog", snippet, meta);
+        var question = "У какого товара с интерфейсом RS-485 / Modbus RTU самая большая гарантия?";
+
+        var wrong = EvidenceValidator.ValidateEvidenceWithReason("PR-25 имеет гарантию 18 месяцев [S1].", [citation], question);
+        Assert.False(wrong.IsValid);
+        Assert.Contains("extremum violation", wrong.Reason);
+
+        var correct = EvidenceValidator.ValidateEvidenceWithReason("AI-8X имеет гарантию 36 месяцев [S1].", [citation], question);
+        Assert.True(correct.IsValid, correct.Reason);
+    }
+
+    [Fact]
+    public void CatalogEnumeration_RequiresAllRowsMatchingRequestedInterface()
+    {
+        var meta = new DocumentMetadata("catalog-interface", Silo: "product-catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Интерфейс |
+            | --- | --- |
+            | TM-200 | RS-485 / Modbus RTU |
+            | PR-25 | RS-485 / Modbus RTU |
+            | AI-8X | RS-485 / Modbus RTU |
+            | TM-100 | 4-20 mA |
+            """;
+        var citation = new Citation(1, "catalog-interface", "catalog-interface#1", "Catalog", snippet, meta);
+        var question = "Какие товары из каталога используют RS-485 / Modbus RTU?";
+
+        var incomplete = EvidenceValidator.ValidateEvidenceWithReason("TM-200 [S1].", [citation], question);
+        Assert.False(incomplete.IsValid);
+        Assert.Contains("PR-25", incomplete.Reason);
+        Assert.Contains("AI-8X", incomplete.Reason);
+
+        var complete = EvidenceValidator.ValidateEvidenceWithReason("TM-200, PR-25 и AI-8X [S1].", [citation], question);
+        Assert.True(complete.IsValid, complete.Reason);
     }
 
     [Fact]
@@ -1415,6 +1531,88 @@ public sealed class DogfoodingCorrectiveHardeningTests
         // Ambiguity policy: insufficient columns to compare -> unresolved, fail-open
         Assert.True(isValid, reason);
         Assert.Null(reason);
+    }
+
+    [Fact]
+    public void HorizontalExtremum_NegativeValues_PreserveSignWhenSelectingMaximum()
+    {
+        var meta = new DocumentMetadata("doc-wh-negative", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург |
+            | --- | --- | --- | --- |
+            | PR-10 | -5 | -2 | -10 |
+            """;
+        var citation = new Citation(1, "doc-wh-negative", "doc-wh-negative#1", "Warehouse", snippet, meta);
+        var question = "На каком складе больше всего PR-10?";
+
+        var correct = EvidenceValidator.ValidateEvidenceWithReason("Казань — -2 [S1]", [citation], question);
+        Assert.True(correct.IsValid, correct.Reason);
+
+        var incorrect = EvidenceValidator.ValidateEvidenceWithReason("Екатеринбург — -10 [S1]", [citation], question);
+        Assert.False(incorrect.IsValid);
+        Assert.Contains("horizontal extremum violation", incorrect.Reason);
+    }
+
+    [Fact]
+    public void HorizontalExtremum_SimilarColumnNames_DoNotCrossBindWinner()
+    {
+        var meta = new DocumentMetadata("doc-wh-similar", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Московская область | Казань |
+            | --- | --- | --- | --- |
+            | PR-10 | 8 | 6 | 7 |
+            """;
+        var citation = new Citation(1, "doc-wh-similar", "doc-wh-similar#1", "Warehouse", snippet, meta);
+        var question = "На каком складе больше всего PR-10?";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(
+            "Московская область — 8 [S1]",
+            [citation],
+            question);
+
+        Assert.False(isValid);
+        Assert.Contains("horizontal extremum violation", reason);
+    }
+
+    [Theory]
+    [InlineData("Does thermostat PR-10 support at least 3 inputs?")]
+    [InlineData("Which thermostat PR-10 supports 8 inputs?")]
+    public void HorizontalExtremum_NonExtremumEnglishWording_DoesNotTriggerValidation(string question)
+    {
+        var meta = new DocumentMetadata("doc-threshold", Silo: "specs", "", "", "", "Specs", 2026, "", DateOnly.MinValue, "Specs");
+        var snippet = """
+            | Модель | Основные входы | Резервные входы |
+            | --- | --- | --- |
+            | PR-10 | 8 | 2 |
+            """;
+        var citation = new Citation(1, "doc-threshold", "doc-threshold#1", "Specs", snippet, meta);
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(
+            "Thermostat PR-10 supports 8 inputs [S1].",
+            [citation],
+            question);
+
+        Assert.True(isValid, reason);
+    }
+
+    [Fact]
+    public void HorizontalExtremum_HighPrecisionValue_IsComparedWithoutRounding()
+    {
+        var meta = new DocumentMetadata("doc-wh-precision", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург |
+            | --- | --- | --- | --- |
+            | PR-10 | 0.002 | 0.001 | 0.0005 |
+            """;
+        var citation = new Citation(1, "doc-wh-precision", "doc-wh-precision#1", "Warehouse", snippet, meta);
+        var question = "На каком складе максимальное значение для PR-10?";
+
+        var exact = EvidenceValidator.ValidateEvidenceWithReason("Москва — 0.002 [S1]", [citation], question);
+        Assert.True(exact.IsValid, exact.Reason);
+
+        var rounded = EvidenceValidator.ValidateEvidenceWithReason("Москва — 0 [S1]", [citation], question);
+        Assert.False(rounded.IsValid);
+        Assert.Contains("0.002", rounded.Reason);
     }
 
     private sealed class CountingStaticChatClient : IChatClient

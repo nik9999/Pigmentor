@@ -84,7 +84,7 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
         services.Configure<RagPipelineSettings>(options =>
         {
             options.Budget = new ContextBudget(MaxTotalTokens: 8192, ReservedOutputTokens: 1024);
-            options.DefaultTopK = 5;
+            options.DefaultTopK = 8;
         });
 
         // 2. Chat Client setup
@@ -225,12 +225,19 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
             services.AddSingleton<IIngestionStateStore>(_ => new SqliteIngestionStateStore(connectionString));
         }
 
-        // 5. Retrieval setup
-        services.AddSingleton<IRetriever>(sp =>
+        // 5. Retrieval setup (Hybrid: Dense vector search + Sparse BM25 fused with RRF)
+        services.AddSingleton<SparseRetriever>();
+        services.AddSingleton<DenseRetriever>(sp =>
         {
             var emb = sp.GetRequiredService<IEmbeddingService>();
             var vec = sp.GetRequiredService<IVectorStore>();
             return new DenseRetriever(emb, vec);
+        });
+        services.AddSingleton<IRetriever>(sp =>
+        {
+            var dense = sp.GetRequiredService<DenseRetriever>();
+            var sparse = sp.GetRequiredService<SparseRetriever>();
+            return new HybridRetriever(dense, sparse);
         });
 
         // 6. Extraction, Chunker, and Ingestion setup
@@ -244,7 +251,28 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
         services.AddSingleton<IDocumentIngestionService, DocumentIngestionService>();
 
         var provider = services.BuildServiceProvider();
+
+        // 7. Warm up SparseRetriever with all persisted chunks
+        var vectorStore = provider.GetRequiredService<IVectorStore>();
+        var sparseRetriever = provider.GetRequiredService<SparseRetriever>();
+        var allChunks = await vectorStore.GetAllChunksAsync(cancellationToken).ConfigureAwait(false);
+        if (allChunks.Count > 0)
+        {
+            sparseRetriever.Index(allChunks);
+        }
+
         return new PigmentorAppRuntime(provider);
+    }
+
+    /// <summary>
+    /// Reloads all chunks from persistent storage and updates the in-memory sparse (BM25) index.
+    /// </summary>
+    public async Task RefreshSparseIndexAsync(CancellationToken cancellationToken = default)
+    {
+        var vectorStore = _serviceProvider.GetRequiredService<IVectorStore>();
+        var sparse = _serviceProvider.GetRequiredService<SparseRetriever>();
+        var allChunks = await vectorStore.GetAllChunksAsync(cancellationToken).ConfigureAwait(false);
+        sparse.Index(allChunks);
     }
 
     public void Dispose()

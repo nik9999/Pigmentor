@@ -47,4 +47,8 @@ public interface IVectorStore
 
     /// <summary>Delete the chunks with the given <paramref name="chunkIds"/>.</summary>
     Task DeleteAsync(IEnumerable<string> chunkIds, CancellationToken cancellationToken = default);
+
+    /// <summary>Retrieve all chunks stored in the collection for full-text / BM25 sparse indexing.</summary>
+    Task<IReadOnlyList<DocumentChunk>> GetAllChunksAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<DocumentChunk>>([]);
 }

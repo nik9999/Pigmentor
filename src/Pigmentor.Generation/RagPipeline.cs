@@ -40,6 +40,9 @@ public sealed class RagPipeline : IRagPipeline
 {
     private static readonly Regex BracketRegex = new(@"\[([^\]]+)\]", RegexOptions.Compiled);
     private static readonly Regex TagRegex = new(@"\b([sс]\d+)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex StandaloneCitationLineRegex = new(
+        @"(?m)^[\t ]*(?:\[S\d+\][\t ]*)+\r?(?:\n|$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex IdentifierRegex = new(@"\b[A-Za-z]{2,}[A-Za-z0-9]*-[A-Za-z0-9/]+\b", RegexOptions.Compiled);
 
     private static readonly HashSet<string> ExcludedEntityProtocols = new(StringComparer.OrdinalIgnoreCase)
@@ -339,7 +342,7 @@ public sealed class RagPipeline : IRagPipeline
 
             if (entityCandidatesList.Count > 0)
             {
-                candidatePool = MergeEntityCandidates(candidatePool, entityCandidatesList, identifiers);
+                candidatePool = MergeEntityCandidates(candidatePool, entityCandidatesList, identifiers, topK);
             }
         }
 
@@ -494,7 +497,7 @@ public sealed class RagPipeline : IRagPipeline
         }
         else
         {
-            answer = rawAnswer;
+            answer = NormalizeCitationTags(rawAnswer);
             (citations, validCount, invalidCount) = ParseAndMapCitations(answer, prep.RagContext.SourceMap);
         }
 
@@ -568,6 +571,31 @@ public sealed class RagPipeline : IRagPipeline
         return (citations, citations.Count, invalidCount);
     }
 
+    private static string NormalizeCitationTags(string answer)
+    {
+        var canonical = BracketRegex.Replace(answer, bracketMatch =>
+        {
+            var inner = bracketMatch.Groups[1].Value;
+            var normalizedInner = TagRegex.Replace(inner, tagMatch =>
+            {
+                var rawTag = tagMatch.Groups[1].Value;
+                return "S" + rawTag[1..];
+            });
+            return "[" + normalizedInner + "]";
+        });
+
+        return StandaloneCitationLineRegex.Replace(canonical, lineMatch =>
+        {
+            var prefix = canonical[..lineMatch.Index];
+            var lineTags = TagRegex.Matches(lineMatch.Value)
+                .Select(match => "S" + match.Groups[1].Value[1..])
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+            return lineTags.All(tag => prefix.Contains($"[{tag}]", StringComparison.OrdinalIgnoreCase))
+                ? string.Empty
+                : lineMatch.Value;
+        }).TrimEnd();
+    }
+
     private static List<string> ExtractEntityIdentifiers(string text)
     {
         var list = new List<string>();
@@ -591,43 +619,31 @@ public sealed class RagPipeline : IRagPipeline
     private static List<RetrievalResult> MergeEntityCandidates(
         IReadOnlyList<RetrievalResult> primary,
         IReadOnlyList<RetrievalResult> secondary,
-        List<string> entityKeywords)
+        List<string> entityKeywords,
+        int maxCount)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var entityMatches = new List<RetrievalResult>();
-        var others = new List<RetrievalResult>();
+        var combined = new List<RetrievalResult>();
 
-        void Consider(RetrievalResult r)
+        // 1. Primary candidates (direct matches for the question)
+        foreach (var r in primary)
         {
             if (seen.Add(r.Chunk.ChunkId))
             {
-                var text = r.Chunk.Text;
-                var matchesEntity = entityKeywords.Count > 0 &&
-                                    entityKeywords.Any(k => text.Contains(k, StringComparison.OrdinalIgnoreCase));
-                if (matchesEntity)
-                {
-                    entityMatches.Add(r);
-                }
-                else
-                {
-                    others.Add(r);
-                }
+                combined.Add(r);
             }
         }
 
+        // 2. Supplemental entity candidates (to guarantee entity-grounding presence)
         foreach (var r in secondary)
         {
-            Consider(r);
-        }
-        foreach (var r in primary)
-        {
-            Consider(r);
+            if (seen.Add(r.Chunk.ChunkId))
+            {
+                combined.Add(r);
+            }
         }
 
-        var combined = new List<RetrievalResult>();
-        combined.AddRange(entityMatches);
-        combined.AddRange(others);
-        return combined;
+        return combined.Take(maxCount).ToList();
     }
 
     private sealed record PreparedExecution(

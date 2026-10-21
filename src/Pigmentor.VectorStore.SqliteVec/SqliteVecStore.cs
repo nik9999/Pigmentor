@@ -415,6 +415,71 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
         }
     }
 
+    public async Task<IReadOnlyList<DocumentChunk>> GetAllChunksAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            await using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"SELECT chunk_id, document_id, chunk_index, text, start_char_offset, end_char_offset,
+                                       silo, department, office, confidentiality_level, document_type, fiscal_year,
+                                       author, last_modified, title
+                                FROM chunks ORDER BY row_id ASC;";
+
+            var list = new List<DocumentChunk>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var chunkId = reader.GetString(0);
+                var docId = reader.GetString(1);
+                var chunkIndex = reader.GetInt32(2);
+                var text = reader.GetString(3);
+                var startOffset = reader.GetInt32(4);
+                var endOffset = reader.GetInt32(5);
+                var silo = reader.GetString(6);
+                var department = reader.GetString(7);
+                var office = reader.GetString(8);
+                var confLevel = reader.GetString(9);
+                var docType = reader.GetString(10);
+                var fiscalYear = reader.GetInt32(11);
+                var author = reader.GetString(12);
+                var lastModifiedStr = reader.GetString(13);
+                var title = reader.GetString(14);
+
+                var lastModified = DateOnly.TryParse(lastModifiedStr, CultureInfo.InvariantCulture, out var d) ? d : DateOnly.MinValue;
+
+                var metadata = new DocumentMetadata(
+                    Id: docId,
+                    Silo: silo,
+                    Department: department,
+                    Office: office,
+                    ConfidentialityLevel: confLevel,
+                    DocumentType: docType,
+                    FiscalYear: fiscalYear,
+                    Author: author,
+                    LastModified: lastModified,
+                    Title: title);
+
+                list.Add(new DocumentChunk(
+                    ChunkId: chunkId,
+                    DocumentId: docId,
+                    ChunkIndex: chunkIndex,
+                    Text: text,
+                    StartCharOffset: startOffset,
+                    EndCharOffset: endOffset,
+                    Metadata: metadata));
+            }
+
+            return list;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)

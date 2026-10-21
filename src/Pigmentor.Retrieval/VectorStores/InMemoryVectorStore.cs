@@ -85,4 +85,12 @@ public sealed class InMemoryVectorStore : IVectorStore
         }
         return Task.CompletedTask;
     }
+
+    public Task<IReadOnlyList<DocumentChunk>> GetAllChunksAsync(CancellationToken cancellationToken = default)
+    {
+        lock (_lock)
+        {
+            return Task.FromResult<IReadOnlyList<DocumentChunk>>(_chunks.Select(c => c.Chunk).ToList());
+        }
+    }
 }

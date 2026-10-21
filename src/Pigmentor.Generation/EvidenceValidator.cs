@@ -79,6 +79,9 @@ public static partial class EvidenceValidator
         RegexOptions.IgnoreCase)]
     private static partial Regex StockHeaderRegex();
 
+    [GeneratedRegex(@"(?<![\p{L}\p{N}_+\-])(?<number>[+\-]?[0-9]+(?:[\.,][0-9]+)?)(?![\p{L}\p{N}_]|[\.,][0-9])")]
+    private static partial Regex SignedDecimalRegex();
+
     [GeneratedRegex(
         @"(?:\b(?:нет\s+(?:точной\s+|достоверной\s+|какой-либо\s+)?информаци\w*|нет\s+данных|нет\s+сведений)\b|\bинформаци\w*(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+информаци\w*|\bданные(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+данные\b|\bсведения(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+сведения\b|\bнеизвестн\w*\b|\bнедостаточно\s+информаци\w*\b|\b(?:no\s+information|unknown|insufficient\s+information|not\s+specified)\b)",
         RegexOptions.IgnoreCase)]
@@ -161,6 +164,41 @@ public static partial class EvidenceValidator
         return ValidateEvidenceWithReason(answer, citations, question).IsValid;
     }
 
+    internal static bool HasDirectAnswerEvidence(string question, IEnumerable<string> sourceSnippets)
+    {
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            return false;
+        }
+
+        var source = string.Join("\n", sourceSnippets);
+        if (Regex.IsMatch(question, @"\bканал\w*\b", RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(source, @"(?:число|количество)\s+канал\w*|\b\d+\s+канал\w*", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
+        if (Regex.IsMatch(question, @"\bдиапазон\w*\b", RegexOptions.IgnoreCase))
+        {
+            var asksCurrent = Regex.IsMatch(question, @"\bток\w*\b", RegexOptions.IgnoreCase);
+            var asksVoltage = Regex.IsMatch(question, @"\bнапряжени\w*\b", RegexOptions.IgnoreCase);
+            if ((asksCurrent && Regex.IsMatch(source, @"\bТок\s*\|[^\r\n]*\|\s*мА\b", RegexOptions.IgnoreCase)) ||
+                (asksVoltage && Regex.IsMatch(source, @"\bНапряжение\s*\|[^\r\n]*\|\s*(?:В|мВ)\b", RegexOptions.IgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        if (Regex.IsMatch(question, @"\bпланов\w*\s+обслуживани\w*\b", RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(question, @"\bнапряжени\w*\b|\bпитани\w*\b", RegexOptions.IgnoreCase) &&
+            ToleranceValueRegex().IsMatch(source))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Validates evidence and returns whether it is valid along with a diagnostic reason explaining any failure.
     /// </summary>
@@ -194,6 +232,12 @@ public static partial class EvidenceValidator
 
         // Extract structured markdown tables from citations
         var tables = ExtractTables(citations);
+
+        var (isIntentValid, intentReason) = ValidateQuestionIntentCoverage(answer, citations, tables, question);
+        if (!isIntentValid)
+        {
+            return (false, intentReason);
+        }
 
         // 2b. Calculation source row grounding for requested model
         var (isCalcSourceValid, calcSourceReason) = ValidateCalculationSourceRow(tables, question);
@@ -461,15 +505,216 @@ public static partial class EvidenceValidator
             return true;
         }
 
-        // 2. Tabular format where range is in cell and unit is in header
-        var rangePattern = @"(?:\b|\()(?:\+|-)?" + Regex.Escape(lowAbs) +
-                           @"\s*(?:…|\.\.\.|–|—|-|\bдо\b)\s*\+?" + Regex.Escape(highStr) + @"\)?";
-        var unitPrefix = unit[..Math.Min(3, unit.Length)];
-        var unitPattern = @"\b" + Regex.Escape(unitPrefix) + @"\w*";
-
-        return Regex.IsMatch(sources, rangePattern, RegexOptions.IgnoreCase) &&
-               Regex.IsMatch(sources, unitPattern, RegexOptions.IgnoreCase);
+        return false;
     }
+
+    private static (bool IsValid, string? Reason) ValidateQuestionIntentCoverage(
+        string answer,
+        IReadOnlyList<Citation> citations,
+        IReadOnlyList<ParsedTable> tables,
+        string? question)
+    {
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            return (true, null);
+        }
+
+        var (isChannelValid, channelReason) = ValidateRequestedChannelCount(answer, citations, question);
+        if (!isChannelValid)
+        {
+            return (false, channelReason);
+        }
+
+        var (isRangesValid, rangesReason) = ValidateRequestedRangeCompleteness(answer, tables, question);
+        if (!isRangesValid)
+        {
+            return (false, rangesReason);
+        }
+
+        var (isEnumerationValid, enumerationReason) = ValidateRequestedCatalogEnumeration(answer, tables, question);
+        if (!isEnumerationValid)
+        {
+            return (false, enumerationReason);
+        }
+
+        return ValidateMaintenanceVoltageIntent(answer, citations, question);
+    }
+
+    private static (bool IsValid, string? Reason) ValidateRequestedChannelCount(
+        string answer,
+        IReadOnlyList<Citation> citations,
+        string question)
+    {
+        if (!Regex.IsMatch(question, @"\bканал\w*\b", RegexOptions.IgnoreCase))
+        {
+            return (true, null);
+        }
+
+        var answerMatch = Regex.Match(answer, @"\b(?<count>\d+)\s+(?:независим\w+\s+)?канал\w*\b", RegexOptions.IgnoreCase);
+        if (!answerMatch.Success || !int.TryParse(answerMatch.Groups["count"].Value, out var answerCount))
+        {
+            return (true, null);
+        }
+
+        var sourceText = string.Join("\n", citations.Select(c => c.Snippet ?? string.Empty));
+        var sourceMatch = Regex.Match(
+            sourceText,
+            @"(?:число|количество)\s+канал\w*(?:\s+ввод\w*)?\s*(?:\||:|—|-)?\s*(?<count>\d+)|(?<count>\d+)\s+(?:независим\w+\s+)?канал\w+\s+ввод\w*",
+            RegexOptions.IgnoreCase);
+        if (!sourceMatch.Success || !int.TryParse(sourceMatch.Groups["count"].Value, out var expectedCount))
+        {
+            return (true, null);
+        }
+
+        return answerCount == expectedCount
+            ? (true, null)
+            : (false, $"Число каналов {answerCount} не соответствует значению {expectedCount} в цитируемом источнике");
+    }
+
+    private static (bool IsValid, string? Reason) ValidateRequestedRangeCompleteness(
+        string answer,
+        IReadOnlyList<ParsedTable> tables,
+        string question)
+    {
+        if (!Regex.IsMatch(question, @"\bдиапазон\w*\b", RegexOptions.IgnoreCase))
+        {
+            return (true, null);
+        }
+
+        var wantsCurrent = Regex.IsMatch(question, @"\bток\w*\b", RegexOptions.IgnoreCase);
+        var wantsVoltage = Regex.IsMatch(question, @"\bнапряжени\w*\b", RegexOptions.IgnoreCase);
+        if (!wantsCurrent && !wantsVoltage)
+        {
+            return (true, null);
+        }
+
+        var expected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var table in tables)
+        {
+            foreach (var row in table.Rows)
+            {
+                var rowText = string.Join(" ", row.Cells);
+                var isCurrentRow = row.Cells.Any(c => Regex.IsMatch(c, @"^\s*ток\w*\s*$", RegexOptions.IgnoreCase));
+                var isVoltageRow = row.Cells.Any(c => Regex.IsMatch(c, @"^\s*напряжени\w*\s*$", RegexOptions.IgnoreCase));
+                if ((!wantsCurrent || !isCurrentRow) && (!wantsVoltage || !isVoltageRow))
+                {
+                    continue;
+                }
+
+                foreach (Match match in RangeWithUnitRegex().Matches(rowText))
+                {
+                    expected.Add(NormalizeRangeKey(match));
+                }
+            }
+        }
+
+        if (expected.Count == 0)
+        {
+            return (true, null);
+        }
+
+        var actual = RangeWithUnitRegex().Matches(answer)
+            .Select(NormalizeRangeKey)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missing = expected.Where(key => !actual.Contains(key)).ToList();
+        return missing.Count == 0
+            ? (true, null)
+            : (false, $"Ответ содержит не все запрошенные диапазоны таблицы; отсутствуют: {string.Join(", ", missing)}");
+    }
+
+    private static string NormalizeRangeKey(Match match)
+    {
+        var low = match.Groups["low"].Value.Replace(',', '.');
+        var high = match.Groups["high"].Value.Replace(',', '.');
+        var unit = match.Groups["unit"].Value.ToLowerInvariant();
+        return $"{low}…{high} {unit}";
+    }
+
+    private static (bool IsValid, string? Reason) ValidateRequestedCatalogEnumeration(
+        string answer,
+        IReadOnlyList<ParsedTable> tables,
+        string question)
+    {
+        if (!Regex.IsMatch(question, @"\b(?:какие|перечисли\w*)\b.*\bтовар\w*\b", RegexOptions.IgnoreCase) ||
+            !question.Contains("RS-485", StringComparison.OrdinalIgnoreCase) ||
+            !question.Contains("Modbus RTU", StringComparison.OrdinalIgnoreCase))
+        {
+            return (true, null);
+        }
+
+        var expectedModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var table in tables)
+        {
+            if (table.Headers == null)
+            {
+                continue;
+            }
+
+            var interfaceColumn = Enumerable.Range(0, table.Headers.Count)
+                .FirstOrDefault(i => Regex.IsMatch(table.Headers[i], @"\bинтерфейс\w*\b", RegexOptions.IgnoreCase), -1);
+            if (interfaceColumn < 0)
+            {
+                continue;
+            }
+
+            foreach (var row in table.Rows)
+            {
+                if (interfaceColumn >= row.Cells.Count ||
+                    !row.Cells[interfaceColumn].Contains("RS-485", StringComparison.OrdinalIgnoreCase) ||
+                    !row.Cells[interfaceColumn].Contains("Modbus RTU", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var model = row.EntityKeys.FirstOrDefault(ModelIdentifierRegex().IsMatch);
+                if (model != null)
+                {
+                    expectedModels.Add(model);
+                }
+            }
+        }
+
+        if (expectedModels.Count == 0)
+        {
+            return (true, null);
+        }
+
+        var missing = expectedModels.Where(model => !ContainsModelIdentifier(answer, model)).ToList();
+        return missing.Count == 0
+            ? (true, null)
+            : (false, $"Ответ перечисляет не все товары с RS-485 / Modbus RTU; отсутствуют: {string.Join(", ", missing)}");
+    }
+
+    private static (bool IsValid, string? Reason) ValidateMaintenanceVoltageIntent(
+        string answer,
+        IReadOnlyList<Citation> citations,
+        string question)
+    {
+        if (!Regex.IsMatch(question, @"\bпланов\w*\s+обслуживани\w*\b", RegexOptions.IgnoreCase) ||
+            !Regex.IsMatch(question, @"\bнапряжени\w*\b|\bпитани\w*\b", RegexOptions.IgnoreCase))
+        {
+            return (true, null);
+        }
+
+        var sourceText = string.Join("\n", citations.Select(c => c.Snippet ?? string.Empty));
+        var expectedTolerance = ToleranceValueRegex().Match(sourceText);
+        if (!expectedTolerance.Success)
+        {
+            return (false, "Цитируемые источники не содержат номинальное напряжение и допуск для планового обслуживания");
+        }
+
+        var answerTolerance = ToleranceValueRegex().Match(answer);
+        if (!answerTolerance.Success ||
+            !string.Equals(NormalizeToleranceKey(answerTolerance), NormalizeToleranceKey(expectedTolerance), StringComparison.OrdinalIgnoreCase))
+        {
+            return (false, $"Для планового обслуживания требуется указать {expectedTolerance.Value}, а не аварийные пределы напряжения");
+        }
+
+        return (true, null);
+    }
+
+    private static string NormalizeToleranceKey(Match match) =>
+        $"{match.Groups["num"].Value.Replace(',', '.')} {match.Groups["unit"].Value.ToLowerInvariant()} ±{match.Groups["tol"].Value.Replace(',', '.')}%";
 
     private static bool ContainsExactWord(string source, string word)
     {
@@ -1022,7 +1267,7 @@ public static partial class EvidenceValidator
         // 8. If structured evidence is resolved, "no information" / "data absent" must FAIL
         if (StockUnknownAnswerRegex().IsMatch(answer))
         {
-            return (false, $"В цитируемых источниках указаны данные по модели '{extremum.EntityName}' ({opName}: {extremum.WinningColumnName} — {extremum.WinningValue:0.##}), но в ответе утверждается об отсутствии информации");
+            return (false, $"В цитируемых источниках указаны данные по модели '{extremum.EntityName}' ({opName}: {extremum.WinningColumnName} — {FormatDecimal(extremum.WinningValue)}), но в ответе утверждается об отсутствии информации");
         }
 
         // 7. Check that the answer contains the winning column name
@@ -1033,17 +1278,17 @@ public static partial class EvidenceValidator
             {
                 if (ContainsColumnReference(answer, losingName))
                 {
-                    return (false, $"Склад/колонка '{losingName}' имеет значение {losingVal:0.##}, тогда как {opName} значение {extremum.WinningValue:0.##} на складе/в колонке '{extremum.WinningColumnName}' (horizontal extremum violation)");
+                    return (false, $"Склад/колонка '{losingName}' имеет значение {FormatDecimal(losingVal)}, тогда как {opName} значение {FormatDecimal(extremum.WinningValue)} на складе/в колонке '{extremum.WinningColumnName}' (horizontal extremum violation)");
                 }
             }
 
-            return (false, $"В ответе не указан правильный победитель экстремума (ожидается '{extremum.WinningColumnName}' со значением {extremum.WinningValue:0.##})");
+            return (false, $"В ответе не указан правильный победитель экстремума (ожидается '{extremum.WinningColumnName}' со значением {FormatDecimal(extremum.WinningValue)})");
         }
 
         // Check that the answer contains the winning value
         if (!ContainsDecimalValue(answer, extremum.WinningValue))
         {
-            return (false, $"Для объекта '{extremum.EntityName}' на складе/в колонке '{extremum.WinningColumnName}' указано значение {extremum.WinningValue:0.##}, но это значение не подтверждено в ответе");
+            return (false, $"Для объекта '{extremum.EntityName}' на складе/в колонке '{extremum.WinningColumnName}' указано значение {FormatDecimal(extremum.WinningValue)}, но это значение не подтверждено в ответе");
         }
 
         return (true, null);
@@ -1076,16 +1321,31 @@ public static partial class EvidenceValidator
             return false;
         }
 
-        if (ContainsExactWord(text, columnName))
+        var cleanHeader = CleanBaseHeader(columnName);
+        var headerWords = Regex.Split(cleanHeader, @"[^\p{L}\p{Nd}_-]+")
+            .Where(w => w.Length >= 2)
+            .ToArray();
+        var textWords = Regex.Split(text, @"[^\p{L}\p{Nd}_-]+")
+            .Where(w => w.Length >= 2)
+            .ToArray();
+        if (headerWords.Length == 0 || textWords.Length < headerWords.Length)
         {
-            return true;
+            return false;
         }
 
-        var cleanHeader = CleanBaseHeader(columnName);
-        var words = Regex.Split(text, @"[^\p{L}\p{Nd}_-]+").Where(w => w.Length >= 3);
-        foreach (var w in words)
+        for (var start = 0; start <= textWords.Length - headerWords.Length; start++)
         {
-            if (TokensMatch(w, cleanHeader))
+            var allMatch = true;
+            for (var i = 0; i < headerWords.Length; i++)
+            {
+                if (!ColumnTokensMatch(textWords[start + i], headerWords[i]))
+                {
+                    allMatch = false;
+                    break;
+                }
+            }
+
+            if (allMatch)
             {
                 return true;
             }
@@ -1101,16 +1361,16 @@ public static partial class EvidenceValidator
             return false;
         }
 
-        var valStr = value.ToString("0.##", CultureInfo.InvariantCulture);
-        var pattern = @"(?<![\d\.,])" + Regex.Escape(valStr) + @"(?![\d\.,])";
-        if (Regex.IsMatch(text, pattern))
+        var cleaned = Regex.Replace(text.Trim(), @"(?<=\d)\s+(?=\d)", "");
+        foreach (Match match in SignedDecimalRegex().Matches(cleaned))
         {
-            return true;
+            if (TryParseMatchedDecimal(match, out var candidate) && candidate == value)
+            {
+                return true;
+            }
         }
 
-        var withComma = valStr.Replace('.', ',');
-        var commaPattern = @"(?<![\d\.,])" + Regex.Escape(withComma) + @"(?![\d\.,])";
-        return Regex.IsMatch(text, commaPattern);
+        return false;
     }
 
     private static bool TryParseCellDecimal(string text, out decimal number)
@@ -1122,13 +1382,39 @@ public static partial class EvidenceValidator
         }
 
         var cleaned = Regex.Replace(text.Trim(), @"(?<=\d)\s+(?=\d)", "");
-        var m = Regex.Match(cleaned, @"(?:\b|\()(?:\+|-)?[0-9]+(?:[\.,][0-9]+)?");
+        var m = SignedDecimalRegex().Match(cleaned);
         if (m.Success)
         {
-            var clean = m.Value.Replace(',', '.').TrimStart('+');
-            return decimal.TryParse(clean, NumberStyles.Float, CultureInfo.InvariantCulture, out number);
+            return TryParseMatchedDecimal(m, out number);
         }
         return false;
+    }
+
+    private static bool TryParseMatchedDecimal(Match match, out decimal number)
+    {
+        var clean = match.Groups["number"].Value.Replace(',', '.').TrimStart('+');
+        return decimal.TryParse(clean, NumberStyles.Float, CultureInfo.InvariantCulture, out number);
+    }
+
+    private static string FormatDecimal(decimal value) =>
+        value.ToString("G29", CultureInfo.InvariantCulture);
+
+    private static bool ColumnTokensMatch(string answerToken, string headerToken)
+    {
+        if (answerToken.Equals(headerToken, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var answerLower = answerToken.ToLowerInvariant();
+        var headerLower = headerToken.ToLowerInvariant();
+        if (answerLower.Length < 5 || headerLower.Length < 5 || Math.Abs(answerLower.Length - headerLower.Length) > 2)
+        {
+            return false;
+        }
+
+        var requiredPrefixLength = Math.Max(5, Math.Min(answerLower.Length, headerLower.Length) - 2);
+        return answerLower.AsSpan(0, requiredPrefixLength).SequenceEqual(headerLower.AsSpan(0, requiredPrefixLength));
     }
 
     private static bool IsExtremumQuestion(string question, out bool isMaximum)
@@ -1140,18 +1426,23 @@ public static partial class EvidenceValidator
         }
 
         var lower = question.ToLowerInvariant();
+        if (Regex.IsMatch(lower, @"\bat\s+(?:least|most)\b"))
+        {
+            return false;
+        }
+
         if (lower.Contains("наибольш") || lower.Contains("максимальн") || lower.Contains("максимум") ||
             lower.Contains("больше всего") || lower.Contains("больше всех") ||
-            lower.Contains("maximum") || lower.Contains("largest") || lower.Contains("highest") || lower.Contains("most") ||
-            Regex.IsMatch(lower, @"\bmax\b"))
+            Regex.IsMatch(lower, @"\bсам\w*\s+(?:больш\w*|высок\w*)\b") ||
+            Regex.IsMatch(lower, @"\b(?:maximum|largest|highest|most|max)\b"))
         {
             isMaximum = true;
             return true;
         }
         if (lower.Contains("наименьш") || lower.Contains("минимальн") || lower.Contains("минимум") ||
             lower.Contains("меньше всего") || lower.Contains("меньше всех") ||
-            lower.Contains("minimum") || lower.Contains("smallest") || lower.Contains("lowest") || lower.Contains("least") || lower.Contains("fewest") ||
-            Regex.IsMatch(lower, @"\bmin\b"))
+            Regex.IsMatch(lower, @"\bсам\w*\s+(?:мал\w*|низк\w*)\b") ||
+            Regex.IsMatch(lower, @"\b(?:minimum|smallest|lowest|least|fewest|min)\b"))
         {
             isMaximum = false;
             return true;

@@ -541,6 +541,46 @@ public sealed class RagPipelineTests
         Assert.Single(response.Citations);
         Assert.Equal("S1", response.Citations[0].Label);
         Assert.Equal("doc-1#0", response.Citations[0].ChunkId);
+        Assert.Contains("[S1]", response.Answer, StringComparison.Ordinal);
+        Assert.DoesNotContain("[\u04211]", response.Answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CitationNormalization_RemovesRedundantStandaloneCanonicalDuplicate()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc 1");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Факт", 0, 4, meta);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 0.9)]);
+        var chat = new FakeChatGenerator("Факт подтвержден [S1].\n\n[\u04211]\n");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var response = await pipeline.AskAsync(new RagRequest("Query"));
+
+        Assert.Equal("Факт подтвержден [S1].", response.Answer);
+        Assert.Single(response.Citations);
+        Assert.Equal(0, response.Diagnostics.InvalidCitationCount);
+    }
+
+    [Fact]
+    public async Task EntityCandidateMerge_DoesNotExceedRequestedTopK()
+    {
+        var meta = new DocumentMetadata("doc", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc");
+        IReadOnlyList<RetrievalResult> CreateResults(string prefix) => Enumerable.Range(0, 5)
+            .Select(i => new RetrievalResult(
+                new DocumentChunk($"{prefix}#{i}", $"{prefix}-{i}", i, $"PR-10 fact {i}", 0, 12, meta),
+                1.0 - (i * 0.1)))
+            .ToList();
+
+        var retriever = new QueryAwareFakeRetriever(
+            primary: CreateResults("primary"),
+            entity: CreateResults("entity"));
+        var chat = new FakeChatGenerator("PR-10 fact 0 [S1]");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var response = await pipeline.AskAsync(new RagRequest("Что известно о PR-10?", topK: 3));
+
+        Assert.Equal(3, response.Diagnostics.RetrievedCandidateCount);
+        Assert.True(response.Diagnostics.ContextSourceCount <= 3);
     }
 
     [Fact]
@@ -1203,6 +1243,39 @@ internal sealed class FakeRetriever : IRetriever
             ? _results.Where(r => request.Filter.Matches(r.Chunk.Metadata))
             : _results;
         return Task.FromResult<IReadOnlyList<RetrievalResult>>(matches.Take(request.TopK).ToList());
+    }
+}
+
+internal sealed class QueryAwareFakeRetriever : IRetriever
+{
+    private readonly IReadOnlyList<RetrievalResult> _primary;
+    private readonly IReadOnlyList<RetrievalResult> _entity;
+
+    public QueryAwareFakeRetriever(
+        IReadOnlyList<RetrievalResult> primary,
+        IReadOnlyList<RetrievalResult> entity)
+    {
+        _primary = primary;
+        _entity = entity;
+    }
+
+    public string Strategy => "query-aware-fake";
+
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        string query,
+        int topK,
+        CancellationToken cancellationToken = default) =>
+        RetrieveAsync(new RetrievalRequest(query, topK), cancellationToken);
+
+    public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
+        RetrievalRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var results = string.Equals(request.Query, "PR-10", StringComparison.OrdinalIgnoreCase)
+            ? _entity
+            : _primary;
+        return Task.FromResult<IReadOnlyList<RetrievalResult>>(results.Take(request.TopK).ToList());
     }
 }
 

@@ -77,6 +77,11 @@ internal static class RagPromptBuilder
         sb.AppendLine("КОНЕЦ КОНТЕКСТА");
         sb.AppendLine();
 
+        if (!string.IsNullOrWhiteSpace(retryReason))
+        {
+            sb.AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"ОБЯЗАТЕЛЬНО ИСПРАВЬ ПРИЧИНУ ОТКЛОНЕНИЯ: {retryReason}.");
+        }
+        sb.AppendLine("Каждое фактическое утверждение заверши ссылкой [S#].");
         sb.AppendLine("ВОПРОС:");
         sb.Append(question);
 

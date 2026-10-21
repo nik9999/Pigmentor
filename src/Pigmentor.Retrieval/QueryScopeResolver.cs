@@ -36,8 +36,9 @@ public static partial class QueryScopeResolver
     private static partial Regex CommercialTermsRegex();
 
     // Warehouse/stock queries:
-    // e.g. "на складе", "на складах", "со склада", "в складах"
-    [GeneratedRegex(@"\b(?:на|в|со)\s+склад\w*\b", RegexOptions.IgnoreCase)]
+    // The warehouse noun itself is catalog-specific, including constructions such as
+    // "на каком складе", where a preposition is not adjacent to the noun.
+    [GeneratedRegex(@"\bсклад\w*\b", RegexOptions.IgnoreCase)]
     private static partial Regex WarehouseScopeRegex();
 
     /// <summary>
@@ -63,4 +64,3 @@ public static partial class QueryScopeResolver
         return null;
     }
 }
-

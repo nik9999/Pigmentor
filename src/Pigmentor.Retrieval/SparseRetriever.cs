@@ -22,6 +22,7 @@ public sealed partial class SparseRetriever : IRetriever
 
     private readonly Dictionary<string, double> _idf = new(StringComparer.Ordinal);
     private readonly List<(DocumentChunk Chunk, Dictionary<string, int> TermFreq, int Length)> _docs = [];
+    private readonly Lock _lock = new();
     private double _avgDocLength;
 
     public SparseRetriever(double k1 = 1.5, double b = 0.75)
@@ -39,31 +40,34 @@ public sealed partial class SparseRetriever : IRetriever
     public void Index(IEnumerable<DocumentChunk> chunks)
     {
         ArgumentNullException.ThrowIfNull(chunks);
-        _docs.Clear();
-        _idf.Clear();
+        lock (_lock)
+        {
+            _docs.Clear();
+            _idf.Clear();
 
-        var df = new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
-        long totalLen = 0;
-        foreach (var c in chunks)
-        {
-            var tokens = Tokenize(c.Text);
-            var tf = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var t in tokens)
+            var df = new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
+            long totalLen = 0;
+            foreach (var c in chunks)
             {
-                tf[t] = tf.TryGetValue(t, out var n) ? n + 1 : 1;
+                var tokens = Tokenize(c.Text);
+                var tf = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var t in tokens)
+                {
+                    tf[t] = tf.TryGetValue(t, out var n) ? n + 1 : 1;
+                }
+                _docs.Add((c, tf, tokens.Length));
+                totalLen += tokens.Length;
+                foreach (var term in tf.Keys)
+                {
+                    df.AddOrUpdate(term, 1, (_, v) => v + 1);
+                }
             }
-            _docs.Add((c, tf, tokens.Length));
-            totalLen += tokens.Length;
-            foreach (var term in tf.Keys)
+            _avgDocLength = _docs.Count == 0 ? 0 : (double)totalLen / _docs.Count;
+            // Standard Okapi IDF.
+            foreach (var (term, freq) in df)
             {
-                df.AddOrUpdate(term, 1, (_, v) => v + 1);
+                _idf[term] = Math.Log((_docs.Count - freq + 0.5) / (freq + 0.5) + 1.0);
             }
-        }
-        _avgDocLength = _docs.Count == 0 ? 0 : (double)totalLen / _docs.Count;
-        // Standard Okapi IDF.
-        foreach (var (term, freq) in df)
-        {
-            _idf[term] = Math.Log((_docs.Count - freq + 0.5) / (freq + 0.5) + 1.0);
         }
     }
 
@@ -82,29 +86,34 @@ public sealed partial class SparseRetriever : IRetriever
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
         var queryTokens = Tokenize(request.Query);
-        var scored = new List<RetrievalResult>(_docs.Count);
-        foreach (var (chunk, tf, len) in _docs)
+        var scored = new List<RetrievalResult>();
+
+        lock (_lock)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (request.Filter is not null && !request.Filter.Matches(chunk.Metadata))
+            scored.Capacity = _docs.Count;
+            foreach (var (chunk, tf, len) in _docs)
             {
-                continue;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
 
-            double score = 0;
-            foreach (var qt in queryTokens)
-            {
-                if (!_idf.TryGetValue(qt, out var idf) || !tf.TryGetValue(qt, out var f))
+                if (request.Filter is not null && !request.Filter.Matches(chunk.Metadata))
                 {
                     continue;
                 }
-                var denom = f + K1 * (1 - B + B * len / Math.Max(_avgDocLength, 1.0));
-                score += idf * ((K1 + 1) * f) / denom;
-            }
-            if (score > 0)
-            {
-                scored.Add(new RetrievalResult(chunk, score));
+
+                double score = 0;
+                foreach (var qt in queryTokens)
+                {
+                    if (!_idf.TryGetValue(qt, out var idf) || !tf.TryGetValue(qt, out var f))
+                    {
+                        continue;
+                    }
+                    var denom = f + K1 * (1 - B + B * len / Math.Max(_avgDocLength, 1.0));
+                    score += idf * ((K1 + 1) * f) / denom;
+                }
+                if (score > 0)
+                {
+                    scored.Add(new RetrievalResult(chunk, score));
+                }
             }
         }
 
