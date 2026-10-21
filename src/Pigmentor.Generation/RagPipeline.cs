@@ -160,6 +160,24 @@ public sealed class RagPipeline : IRagPipeline
 
         var firstResponse = FinalizeResponse(rawAnswer, prep, genSw.Elapsed);
 
+        string? firstRejectionReason = null;
+        if (!firstResponse.Diagnostics.RequiredCitationsSatisfied)
+        {
+            if (firstResponse.Diagnostics.ValidCitationCount == 0)
+            {
+                firstRejectionReason = "Отсутствуют обязательные ссылки [S#] на источник с данными";
+            }
+            else if (firstResponse.Diagnostics.InvalidCitationCount > 0)
+            {
+                firstRejectionReason = $"Обнаружены недействительные ссылки [S#] ({firstResponse.Diagnostics.InvalidCitationCount})";
+            }
+            else
+            {
+                var (_, reason) = EvidenceValidator.ValidateEvidenceWithReason(rawAnswer, firstResponse.Citations, request.Question);
+                firstRejectionReason = reason;
+            }
+        }
+
 #if DEBUG
         Console.Error.WriteLine("========== [DEBUG: FIRST GENERATION] ==========");
         Console.Error.WriteLine($"Raw Answer:\n{rawAnswer}");
@@ -167,8 +185,8 @@ public sealed class RagPipeline : IRagPipeline
         Console.Error.WriteLine($"Invalid Citations Count: {firstResponse.Diagnostics.InvalidCitationCount}");
         Console.Error.WriteLine($"Detected Citations: [{string.Join(", ", firstResponse.Citations.Select(c => $"[S{c.SourceIndex}: {c.DocumentId}]"))}]");
         Console.Error.WriteLine($"RequiredCitationsSatisfied: {firstResponse.Diagnostics.RequiredCitationsSatisfied}");
-        var (isFirstValid, firstRejectionReason) = EvidenceValidator.DiagnoseEvidence(rawAnswer, firstResponse.Citations);
-        Console.Error.WriteLine($"EvidenceValidator Result: {isFirstValid} (Reason: {firstRejectionReason ?? "None"})");
+        var (isFirstValid, debugFirstReason) = EvidenceValidator.DiagnoseEvidence(rawAnswer, firstResponse.Citations, request.Question);
+        Console.Error.WriteLine($"EvidenceValidator Result: {isFirstValid} (Reason: {debugFirstReason ?? "None"})");
         Console.Error.WriteLine("================================================");
 #endif
 
@@ -182,12 +200,7 @@ public sealed class RagPipeline : IRagPipeline
         if (shouldRetry)
         {
             Console.Error.WriteLine("========== [DEBUG: RETRY TRIGGERED] ==========");
-            string retryReason = firstResponse.Diagnostics.ValidCitationCount == 0
-                ? "No valid citations found"
-                : firstResponse.Diagnostics.InvalidCitationCount > 0
-                    ? $"Invalid citations found ({firstResponse.Diagnostics.InvalidCitationCount})"
-                    : $"Evidence not satisfied: {firstRejectionReason ?? "unknown"}";
-            Console.Error.WriteLine($"Retry Reason: {retryReason}");
+            Console.Error.WriteLine($"Retry Reason: {firstRejectionReason ?? "unknown"}");
         }
         else
         {
@@ -200,7 +213,7 @@ public sealed class RagPipeline : IRagPipeline
         if (shouldRetry)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var retryPrompt = RagPromptBuilder.BuildRetryPrompt(request.Question, prep.RagContext, rawAnswer);
+            var retryPrompt = RagPromptBuilder.BuildRetryPrompt(request.Question, prep.RagContext, rawAnswer, firstRejectionReason);
 #if DEBUG
             Console.Error.WriteLine("========== RAG DEBUG RETRY PROMPT ==========");
             Console.Error.WriteLine(retryPrompt);
@@ -218,7 +231,7 @@ public sealed class RagPipeline : IRagPipeline
             Console.Error.WriteLine($"Retry Invalid Citations Count: {retryResponse.Diagnostics.InvalidCitationCount}");
             Console.Error.WriteLine($"Retry Citations: [{string.Join(", ", retryResponse.Citations.Select(c => $"[S{c.SourceIndex}: {c.DocumentId}]"))}]");
             Console.Error.WriteLine($"Retry RequiredCitationsSatisfied: {retryResponse.Diagnostics.RequiredCitationsSatisfied}");
-            var (isRetryValid, retryRejectionReason) = EvidenceValidator.DiagnoseEvidence(retryAnswer, retryResponse.Citations);
+            var (isRetryValid, retryRejectionReason) = EvidenceValidator.DiagnoseEvidence(retryAnswer, retryResponse.Citations, request.Question);
             Console.Error.WriteLine($"Retry EvidenceValidator Result: {isRetryValid} (Reason: {retryRejectionReason ?? "None"})");
             Console.Error.WriteLine("===============================================");
 #endif
@@ -379,6 +392,7 @@ public sealed class RagPipeline : IRagPipeline
         }
 
         return new PreparedExecution(
+            Question: request.Question,
             CandidatePool: candidatePool,
             FilteredCandidates: filteredCandidates,
             RerankedCandidates: rerankedCandidates,
@@ -492,7 +506,7 @@ public sealed class RagPipeline : IRagPipeline
         else
         {
             var hasValidCitations = validCount > 0 && invalidCount == 0;
-            var isGrounded = hasValidCitations && EvidenceValidator.ValidateEvidence(answer, citations);
+            var isGrounded = hasValidCitations && EvidenceValidator.ValidateEvidence(answer, citations, prep.Question);
             requiredCitationsSatisfied = isGrounded;
         }
 
@@ -617,6 +631,7 @@ public sealed class RagPipeline : IRagPipeline
     }
 
     private sealed record PreparedExecution(
+        string Question,
         IReadOnlyList<RetrievalResult> CandidatePool,
         IReadOnlyList<RetrievalResult> FilteredCandidates,
         IReadOnlyList<RetrievalResult> RerankedCandidates,

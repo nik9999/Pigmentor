@@ -483,6 +483,132 @@ public sealed class DogfoodingCorrectiveHardeningTests
         Assert.Contains("отсутствует информация", response.Answer, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void TableRowBinding_DifferentRowValue_IsRejected()
+    {
+        var meta = new DocumentMetadata("synth1", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "SynthDoc");
+        var snippet = """
+            | Артикул | Параметр | Значение |
+            | --- | --- | --- |
+            | A-100 | Тест | 100 |
+            | B-200 | Тест | 200 |
+            """;
+        var citation = new Citation(1, "synth1", "synth1#1", "Catalog", snippet, meta);
+
+        var invalidAnswer = "Модель A-100 — 200 [S1].";
+        Assert.False(EvidenceValidator.ValidateEvidence(invalidAnswer, [citation]));
+    }
+
+    [Fact]
+    public void TableRowBinding_SameRowValue_IsAccepted()
+    {
+        var meta = new DocumentMetadata("synth1", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "SynthDoc");
+        var snippet = """
+            | Артикул | Параметр | Значение |
+            | --- | --- | --- |
+            | A-100 | Тест | 100 |
+            | B-200 | Тест | 200 |
+            """;
+        var citation = new Citation(1, "synth1", "synth1#1", "Catalog", snippet, meta);
+
+        var validAnswer = "Модель A-100 — 100 [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(validAnswer, [citation]));
+    }
+
+    [Fact]
+    public void TableRowBinding_SameSourceDifferentRowContamination_Fails()
+    {
+        var meta = new DocumentMetadata("single-src", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Doc");
+        var snippet = """
+            Таблица данных:
+            | Модель | Цена |
+            | --- | --- |
+            | A-100 | 100 |
+            | B-200 | 200 |
+            """;
+        var citation = new Citation(1, "single-src", "single-src#1", "Doc", snippet, meta);
+
+        var contaminatedAnswer = "Стоимость датчика A-100 составляет 200 руб. [S1]";
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(contaminatedAnswer, [citation]);
+
+        Assert.False(isValid);
+        Assert.Contains("row-binding violation", reason);
+    }
+
+    [Fact]
+    public void TableExtremum_FilterPlusMax_AcceptsOptimalAndRejectsSuboptimal()
+    {
+        var meta = new DocumentMetadata("ext-table", Silo: "protocols", "", "", "", "Protocols", 2026, "", DateOnly.MinValue, "Protocols");
+        var snippet = """
+            | Устройство | Протокол | Параметр |
+            | --- | --- | --- |
+            | A | protocol X | 12 |
+            | B | protocol Y | 50 |
+            | C | protocol X | 30 |
+            """;
+        var citation = new Citation(1, "ext-table", "ext-table#1", "Protocols", snippet, meta);
+
+        var question = "Какой объект с протоколом protocol X имеет максимальное значение?";
+
+        var optimalAnswer = "Объект C с протоколом protocol X имеет максимальное значение 30 [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(optimalAnswer, [citation], question));
+
+        var suboptimalAnswer = "Объект A с протоколом protocol X имеет максимальное значение 12 [S1].";
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(suboptimalAnswer, [citation], question);
+        Assert.False(isValid);
+        Assert.Contains("extremum violation", reason);
+    }
+
+    [Fact]
+    public void TableArithmetic_BasePriceFromWrongRow_IsRejectedBeforeDerivedAcceptance()
+    {
+        var meta = new DocumentMetadata("prices", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | A-100 | 100 |
+            | B-200 | 200 |
+            """;
+        var citation = new Citation(1, "prices", "prices#1", "Catalog", snippet, meta);
+
+        var question = "Если заказать 5 датчиков A-100, какая будет стоимость?";
+
+        var wrongBaseAnswer = "Стоимость 5 датчиков A-100: 200 руб. × 5 = 1000 руб. [S1]";
+        var (isWrongValid, wrongReason) = EvidenceValidator.ValidateEvidenceWithReason(wrongBaseAnswer, [citation], question);
+        Assert.False(isWrongValid);
+        Assert.Contains("row-binding violation", wrongReason);
+
+        var correctBaseAnswer = "Стоимость 5 датчиков A-100: 100 руб. × 5 = 500 руб. [S1]";
+        var (isCorrectValid, _) = EvidenceValidator.ValidateEvidenceWithReason(correctBaseAnswer, [citation], question);
+        Assert.True(isCorrectValid);
+    }
+
+    [Fact]
+    public void TableRowBinding_ImplicitEntityInAnswer_ResolvedFromQuestionAndValidated()
+    {
+        var meta = new DocumentMetadata("prices", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | A-100 | 100 |
+            | B-200 | 200 |
+            """;
+        var citation = new Citation(1, "prices", "prices#1", "Catalog", snippet, meta);
+
+        var question = "Если заказать 5 датчиков A-100, какая будет стоимость?";
+
+        // Model omits "A-100" in its answer text and picks 200 from B-200
+        var implicitWrongAnswer = "Стоимость до скидки: 200 руб. × 5 = 1000 руб. [S1]";
+        var (isWrongValid, wrongReason) = EvidenceValidator.ValidateEvidenceWithReason(implicitWrongAnswer, [citation], question);
+        Assert.False(isWrongValid);
+        Assert.Contains("row-binding violation", wrongReason);
+
+        // Model omits "A-100" but picks correct 100 from A-100
+        var implicitCorrectAnswer = "Стоимость до скидки: 100 руб. × 5 = 500 руб. [S1]";
+        var (isCorrectValid, _) = EvidenceValidator.ValidateEvidenceWithReason(implicitCorrectAnswer, [citation], question);
+        Assert.True(isCorrectValid);
+    }
+
     private sealed class CountingStaticChatClient : IChatClient
     {
         private readonly string _response;
