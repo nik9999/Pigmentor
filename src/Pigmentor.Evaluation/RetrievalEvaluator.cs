@@ -38,29 +38,33 @@ public static class RetrievalEvaluator
         }
 
         double hitRate = 0, recall = 0, precision = 0, mrr = 0, ndcg = 0;
+        var evaluatedSamples = 0;
         foreach (var (gold, hits) in samples)
         {
             var topK = hits.Take(k).ToList();
             var expectedIds = gold.ExpectedChunkIds is { Count: > 0 }
                 ? gold.ExpectedChunkIds
                 : gold.ExpectedDocumentIds;
+            if (expectedIds.Count == 0)
+            {
+                continue;
+            }
+
+            evaluatedSamples++;
             var retrievedIds = gold.ExpectedChunkIds is { Count: > 0 }
                 ? topK.Select(h => h.Chunk.ChunkId).ToList()
                 : topK.Select(h => h.Chunk.DocumentId).ToList();
             var hitSet = new HashSet<string>(retrievedIds, StringComparer.Ordinal);
             int relevantInTopK = retrievedIds.Count(expectedIds.Contains);
 
-            bool hasHit = expectedIds.Count == 0
-                ? retrievedIds.Count == 0
-                : retrievedIds.Any(expectedIds.Contains);
+            bool hasHit = retrievedIds.Any(expectedIds.Contains);
 
             if (hasHit)
             {
                 hitRate += 1.0;
             }
 
-            recall += expectedIds.Count == 0 ? 0
-                : (double)hitSet.Intersect(expectedIds).Count() / expectedIds.Count;
+            recall += (double)hitSet.Intersect(expectedIds).Count() / expectedIds.Count;
             precision += (double)relevantInTopK / k;
 
             // MRR = 1/rank of first hit.
@@ -75,9 +79,10 @@ public static class RetrievalEvaluator
 
             // nDCG@K with binary relevance.
             double dcg = 0, idcg = 0;
+            var seenRelevantIds = new HashSet<string>(StringComparer.Ordinal);
             for (int i = 0; i < retrievedIds.Count; i++)
             {
-                if (expectedIds.Contains(retrievedIds[i]))
+                if (expectedIds.Contains(retrievedIds[i]) && seenRelevantIds.Add(retrievedIds[i]))
                 {
                     dcg += 1.0 / Math.Log2(i + 2);
                 }
@@ -86,10 +91,15 @@ public static class RetrievalEvaluator
             {
                 idcg += 1.0 / Math.Log2(i + 2);
             }
-            ndcg += idcg == 0 ? 0 : dcg / idcg;
+            ndcg += idcg == 0 ? 0 : Math.Clamp(dcg / idcg, 0.0, 1.0);
         }
 
-        var n = samples.Count;
+        var n = evaluatedSamples;
+        if (n == 0)
+        {
+            return new RetrievalMetrics(0, 0, 0, 0, k, 0, 0);
+        }
+
         return new RetrievalMetrics(
             RecallAtK: recall / n,
             PrecisionAtK: precision / n,

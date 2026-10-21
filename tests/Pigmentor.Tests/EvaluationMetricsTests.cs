@@ -96,6 +96,23 @@ public sealed class EvaluationMetricsTests
         Assert.Equal(0.0, metrics.RecallAtK);
     }
 
+    [Fact]
+    public void RetrievalEvaluator_Ndcg_DuplicateChunksOfSameDocumentCountOnce()
+    {
+        var gold = new GoldenItem("Q?", new HashSet<string> { "doc-1" });
+        var hits = new[]
+        {
+            new RetrievalResult(CreateChunk("doc-1", "first", "doc-1#0"), 1.0),
+            new RetrievalResult(CreateChunk("doc-1", "second", "doc-1#1"), 0.9),
+            new RetrievalResult(CreateChunk("doc-1", "third", "doc-1#2"), 0.8)
+        };
+
+        var metrics = RetrievalEvaluator.Evaluate([(gold, hits)], k: 3);
+
+        Assert.InRange(metrics.NdcgAtK, 0.0, 1.0);
+        Assert.Equal(1.0, metrics.NdcgAtK);
+    }
+
     // --- 2. Generation & Citation Metrics Unit Tests via RagEvaluationRunner ---
 
     [Fact]
@@ -187,7 +204,31 @@ public sealed class EvaluationMetricsTests
         var result = await RagEvaluationRunner.EvaluateAsync(fakePipeline, [c], k: 5);
 
         Assert.Equal(1.0, result.Generation.InsufficientContextAccuracy);
-        Assert.Equal(1.0, result.Retrieval.HitRateAtK);
+        Assert.Equal(0, result.Retrieval.QueryCount);
+        Assert.False(result.CaseResults[0].RetrievalEvaluated);
+        Assert.True(result.QualityGatePassed);
+    }
+
+    [Fact]
+    public async Task RagEvaluationRunner_InsufficientContext_AllowsRetrievedCandidatesWhenModelAbstains()
+    {
+        var c = new RagEvaluationCase(
+            Id: "case-ood-with-candidates",
+            Question: "Какой пароль Wi-Fi?",
+            RelevantDocumentIds: [],
+            ExpectedFacts: [],
+            ExpectInsufficientContext: true);
+        var pipeline = new FakePipeline(
+            "В предоставленном контексте недостаточно информации для ответа.",
+            [CreateHit("nearest-but-irrelevant")]);
+
+        var result = await RagEvaluationRunner.EvaluateAsync(pipeline, [c], k: 5);
+
+        Assert.Equal(0, result.Retrieval.QueryCount);
+        Assert.Equal(1.0, result.Generation.InsufficientContextAccuracy);
+        Assert.False(result.CaseResults[0].RetrievalEvaluated);
+        Assert.NotEmpty(result.CaseResults[0].RetrievedDocumentIds);
+        Assert.True(result.CaseResults[0].Passed);
         Assert.True(result.QualityGatePassed);
     }
 
@@ -274,6 +315,24 @@ public sealed class EvaluationMetricsTests
 
         Assert.Equal(1.0, result.Retrieval.RecallAtK);
         Assert.Equal(1.0 / Math.Log2(3), result.Retrieval.NdcgAtK, precision: 6);
+    }
+
+    [Fact]
+    public async Task RagEvaluationRunner_Ndcg_DuplicateChunksOfSameDocumentCountOnce()
+    {
+        var c = new RagEvaluationCase("duplicate-document", "Q?", ["doc-1"]);
+        var pipeline = new FakePipeline(
+            "Ответ [S1]",
+            [
+                new RetrievalResult(CreateChunk("doc-1", "first", "doc-1#0"), 1.0),
+                new RetrievalResult(CreateChunk("doc-1", "second", "doc-1#1"), 0.9),
+                new RetrievalResult(CreateChunk("doc-1", "third", "doc-1#2"), 0.8)
+            ]);
+
+        var result = await RagEvaluationRunner.EvaluateAsync(pipeline, [c], k: 3);
+
+        Assert.InRange(result.Retrieval.NdcgAtK, 0.0, 1.0);
+        Assert.Equal(1.0, result.Retrieval.NdcgAtK);
     }
 
     // --- 3. EvaluationQualityGate Unit Tests ---

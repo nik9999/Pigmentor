@@ -42,6 +42,7 @@ public static class RagEvaluationRunner
         double totalPrecision = 0;
         double totalMrr = 0;
         double totalNdcg = 0;
+        int evaluatedRetrievalCases = 0;
 
         double totalFactCoverage = 0;
         double totalTermPreservation = 0;
@@ -79,25 +80,28 @@ public static class RagEvaluationRunner
                 : null;
             var relevantDocumentIds = new HashSet<string>(c.RelevantDocumentIds, StringComparer.Ordinal);
             var expectedRelevantCount = relevantChunkIds?.Count ?? relevantDocumentIds.Count;
+            var retrievalEvaluated = expectedRelevantCount > 0;
             var hitsInTopK = response.Sources.Take(k).ToList();
+            string GetRelevanceId(RetrievalResult hit) => relevantChunkIds is not null
+                ? hit.Chunk.ChunkId
+                : hit.Chunk.DocumentId;
             bool IsRelevant(RetrievalResult hit) => relevantChunkIds is not null
                 ? relevantChunkIds.Contains(hit.Chunk.ChunkId)
                 : relevantDocumentIds.Contains(hit.Chunk.DocumentId);
 
             if (expectedRelevantCount == 0)
             {
-                var retrievedNothing = hitsInTopK.Count == 0;
-                caseHitRate = retrievedNothing ? 1.0 : 0.0;
-                caseRecall = retrievedNothing ? 1.0 : 0.0;
-                casePrecision = retrievedNothing ? 1.0 : 0.0;
-                caseMrr = retrievedNothing ? 1.0 : 0.0;
-                caseNdcg = retrievedNothing ? 1.0 : 0.0;
+                caseHitRate = 0.0;
+                caseRecall = 0.0;
+                casePrecision = 0.0;
+                caseMrr = 0.0;
+                caseNdcg = 0.0;
             }
             else
             {
                 var matchedRelevantCount = hitsInTopK
                     .Where(IsRelevant)
-                    .Select(h => relevantChunkIds is not null ? h.Chunk.ChunkId : h.Chunk.DocumentId)
+                    .Select(GetRelevanceId)
                     .Distinct(StringComparer.Ordinal)
                     .Count();
 
@@ -115,9 +119,10 @@ public static class RagEvaluationRunner
                 }
 
                 double dcg = 0.0;
+                var seenRelevantIds = new HashSet<string>(StringComparer.Ordinal);
                 for (var i = 0; i < hitsInTopK.Count; i++)
                 {
-                    if (IsRelevant(hitsInTopK[i]))
+                    if (IsRelevant(hitsInTopK[i]) && seenRelevantIds.Add(GetRelevanceId(hitsInTopK[i])))
                     {
                         dcg += 1.0 / Math.Log2(i + 2);
                     }
@@ -128,14 +133,18 @@ public static class RagEvaluationRunner
                 {
                     idcg += 1.0 / Math.Log2(i + 2);
                 }
-                caseNdcg = idcg == 0.0 ? 0.0 : dcg / idcg;
+                caseNdcg = idcg == 0.0 ? 0.0 : Math.Clamp(dcg / idcg, 0.0, 1.0);
             }
 
-            totalHitRate += caseHitRate;
-            totalRecall += caseRecall;
-            totalPrecision += casePrecision;
-            totalMrr += caseMrr;
-            totalNdcg += caseNdcg;
+            if (retrievalEvaluated)
+            {
+                evaluatedRetrievalCases++;
+                totalHitRate += caseHitRate;
+                totalRecall += caseRecall;
+                totalPrecision += casePrecision;
+                totalMrr += caseMrr;
+                totalNdcg += caseNdcg;
+            }
 
             // 2. Generation & Grounding for this case
             var matchedFacts = new List<string>();
@@ -311,13 +320,11 @@ public static class RagEvaluationRunner
             totalFaithfulness += faithfulness;
 
             // Diagnostics and pass/fail verdict
-            if (caseHitRate < 1.0)
+            if (retrievalEvaluated && caseHitRate < 1.0)
             {
                 var expectedIds = relevantChunkIds is not null ? c.RelevantChunkIds! : c.RelevantDocumentIds;
-                diagnostics.Add(expectedRelevantCount == 0
-                    ? "Retrieval returned sources for a query expected to have no relevant context."
-                    : FormattableString.Invariant(
-                        $"Retrieval missed expected {(relevantChunkIds is not null ? "chunks" : "documents")} [{string.Join(", ", expectedIds)}]. Got [{string.Join(", ", retrievedDocIds)}]."));
+                diagnostics.Add(FormattableString.Invariant(
+                    $"Retrieval missed expected {(relevantChunkIds is not null ? "chunks" : "documents")} [{string.Join(", ", expectedIds)}]. Got [{string.Join(", ", retrievedDocIds)}]."));
             }
 
             if (missingFacts.Count > 0)
@@ -340,7 +347,7 @@ public static class RagEvaluationRunner
                 diagnostics.Add(FormattableString.Invariant($"Answer faithfulness score was {faithfulness:F2}."));
             }
 
-            var passed = caseHitRate >= 1.0
+            var passed = (!retrievalEvaluated || caseHitRate >= 1.0)
                 && missingFacts.Count == 0
                 && missingTerms.Count == 0
                 && invalidCitationsCount == 0
@@ -354,6 +361,7 @@ public static class RagEvaluationRunner
                 HitRate: caseHitRate,
                 Recall: caseRecall,
                 Mrr: caseMrr,
+                RetrievalEvaluated: retrievalEvaluated,
                 RetrievedDocumentIds: retrievedDocIds,
                 MatchedFacts: matchedFacts,
                 MissingFacts: missingFacts,
@@ -371,13 +379,13 @@ public static class RagEvaluationRunner
         var failedCount = totalCount - passedCount;
 
         var retMetrics = new RetrievalMetrics(
-            RecallAtK: totalCount > 0 ? totalRecall / totalCount : 0.0,
-            PrecisionAtK: totalCount > 0 ? totalPrecision / totalCount : 0.0,
-            Mrr: totalCount > 0 ? totalMrr / totalCount : 0.0,
-            NdcgAtK: totalCount > 0 ? totalNdcg / totalCount : 0.0,
+            RecallAtK: evaluatedRetrievalCases > 0 ? totalRecall / evaluatedRetrievalCases : 0.0,
+            PrecisionAtK: evaluatedRetrievalCases > 0 ? totalPrecision / evaluatedRetrievalCases : 0.0,
+            Mrr: evaluatedRetrievalCases > 0 ? totalMrr / evaluatedRetrievalCases : 0.0,
+            NdcgAtK: evaluatedRetrievalCases > 0 ? totalNdcg / evaluatedRetrievalCases : 0.0,
             K: k,
-            QueryCount: totalCount,
-            HitRateAtK: totalCount > 0 ? totalHitRate / totalCount : 0.0);
+            QueryCount: evaluatedRetrievalCases,
+            HitRateAtK: evaluatedRetrievalCases > 0 ? totalHitRate / evaluatedRetrievalCases : 0.0);
 
         var genMetrics = new GenerationMetrics(
             ExpectedFactCoverage: evaluatedGenerationCases > 0 ? totalFactCoverage / evaluatedGenerationCases : 0.0,

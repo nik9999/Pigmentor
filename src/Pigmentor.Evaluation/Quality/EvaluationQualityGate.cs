@@ -24,19 +24,19 @@ public static class EvaluationQualityGate
 
         var failures = new List<string>();
 
-        if (result.Retrieval.HitRateAtK < thresholds.MinHitRateAtK)
+        if (result.Retrieval.QueryCount > 0 && result.Retrieval.HitRateAtK < thresholds.MinHitRateAtK)
         {
             failures.Add(FormattableString.Invariant(
                 $"HitRate@{thresholds.K} ({result.Retrieval.HitRateAtK:F2}) is below required threshold ({thresholds.MinHitRateAtK:F2})"));
         }
 
-        if (result.Retrieval.RecallAtK < thresholds.MinRecallAtK)
+        if (result.Retrieval.QueryCount > 0 && result.Retrieval.RecallAtK < thresholds.MinRecallAtK)
         {
             failures.Add(FormattableString.Invariant(
                 $"Recall@{thresholds.K} ({result.Retrieval.RecallAtK:F2}) is below required threshold ({thresholds.MinRecallAtK:F2})"));
         }
 
-        if (result.Retrieval.Mrr < thresholds.MinMrr)
+        if (result.Retrieval.QueryCount > 0 && result.Retrieval.Mrr < thresholds.MinMrr)
         {
             failures.Add(FormattableString.Invariant(
                 $"MRR ({result.Retrieval.Mrr:F2}) is below required threshold ({thresholds.MinMrr:F2})"));

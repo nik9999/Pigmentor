@@ -103,6 +103,17 @@ public sealed class RagQualityGateTests : IDisposable
 
         // 6. Assert Overall Invariants
         Assert.Equal(20, result.TotalCases);
+        Assert.Equal(20, result.PassedCases);
+        Assert.Equal(0, result.FailedCases);
+        Assert.Equal(18, result.Retrieval.QueryCount);
+        Assert.All(
+            result.CaseResults.Where(c => c.CaseId is "insufficient-context-wifi-019" or "insufficient-context-ip-020"),
+            c =>
+            {
+                Assert.False(c.RetrievalEvaluated);
+                Assert.True(c.InsufficientContextHandled);
+                Assert.True(c.Passed);
+            });
         Assert.True(result.QualityGatePassed,
             $"Quality gate failed: {string.Join("; ", result.QualityGateFailures ?? [])}");
         Assert.Empty(result.QualityGateFailures ?? []);

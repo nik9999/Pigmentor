@@ -10,6 +10,7 @@ public sealed record CaseEvaluationResult(
     double HitRate,
     double Recall,
     double Mrr,
+    bool RetrievalEvaluated,
     IReadOnlyList<string> RetrievedDocumentIds,
     IReadOnlyList<string> MatchedFacts,
     IReadOnlyList<string> MissingFacts,
