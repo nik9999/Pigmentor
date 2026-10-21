@@ -5,7 +5,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>pigmentor</AssemblyName>
+    <AssemblyName>Pigmentor.RAG.Cli</AssemblyName>
     <RootNamespace>Pigmentor.RAG.Cli</RootNamespace>
     <Description>Reference command-line interface for the Pigmentor RAG runtime.</Description>
   </PropertyGroup>
