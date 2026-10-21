@@ -33,6 +33,54 @@ public static partial class EvidenceValidator
         "RS-485", "RS-232", "MODBUS-RTU", "MODBUS-TCP", "MODBUS"
     };
 
+    private static readonly HashSet<string> ComparisonStopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Russian interrogatives & relatives
+        "какой", "какая", "какое", "какие", "какого", "какой", "каком", "какому", "какими", "каких",
+        "кто", "что", "где", "как", "чем", "кому", "чему", "кого", "чего",
+
+        // English interrogatives & relatives
+        "which", "what", "who", "whom", "where", "how",
+
+        // Russian & English generic entity terms
+        "товар", "товары", "товара", "товаров",
+        "объект", "объекты", "объекта", "объектов",
+        "модель", "модели", "моделью", "моделей",
+        "прибор", "приборы", "прибора", "приборов",
+        "устройство", "устройства", "устройств", "устройством",
+        "элемент", "элементы", "элемента", "элементов",
+        "продукт", "продукты", "продукта", "продуктов",
+        "item", "items", "model", "models", "device", "devices", "object", "objects", "product", "products",
+
+        // Russian extremum words
+        "наибольший", "наибольшая", "наибольшее", "наибольшие", "наибольшую", "наибольшего", "наибольшем", "наибольшим", "наибольшими", "наибольших",
+        "наименьший", "наименьшая", "наименьшее", "наименьшие", "наименьшую", "наименьшего", "наименьшем", "наименьшим", "наименьшими", "наименьших",
+        "максимальный", "максимальная", "максимальное", "максимальные", "максимальную", "максимального", "максимальном", "максимальным", "максимальными", "максимальных",
+        "минимальный", "минимальная", "минимальное", "минимальные", "минимальную", "минимального", "минимальном", "минимальным", "минимальными", "минимальных",
+        "максимум", "минимум", "самый", "самая", "самое", "самые", "самую", "самого", "самом", "самым",
+
+        // English extremum words
+        "maximum", "minimum", "max", "min", "largest", "smallest", "highest", "lowest", "greatest", "least", "top", "bottom", "best", "worst",
+
+        // Russian prepositions, conjunctions, particles, verbs
+        "в", "во", "на", "с", "со", "по", "для", "из", "от", "до", "к", "ко", "у", "о", "об", "обо", "при", "через", "под", "над",
+        "не", "и", "или", "а", "но", "да", "ли", "бы", "же", "только",
+        "имеет", "имеют", "указан", "указана", "указано", "указаны", "находится", "находятся", "является", "являются",
+
+        // English prepositions, conjunctions, verbs
+        "in", "on", "at", "with", "by", "for", "from", "to", "of", "into", "about", "under", "over",
+        "not", "and", "or", "is", "are", "was", "were", "has", "have", "had", "be", "been", "only",
+
+        // Neutral metadata/table words
+        "значение", "значения", "значением", "значений",
+        "параметр", "параметры", "параметра", "параметром", "параметров",
+        "характеристика", "характеристики", "характеристику", "характеристикой", "характеристик",
+        "показатель", "показатели", "показателя", "показателем", "показателей",
+        "свойство", "свойства", "свойством", "свойств",
+        "данные", "таблица", "таблицы", "таблице", "строка", "строки", "столбец", "столбца", "список",
+        "value", "values", "parameter", "parameters", "characteristic", "characteristics", "property", "properties", "data", "table", "column", "row", "list"
+    };
+
     /// <summary>
     /// Validates that factual claims in the answer (model IDs, ranges, tolerances, percentages, unit values, prices,
     /// table row binding, extremum operations, and category fidelity) have corresponding evidence in cited sources.
@@ -684,14 +732,16 @@ public static partial class EvidenceValidator
                 continue;
             }
 
-            var matchingRows = FindFilterMatchingRows(table, question);
-            if (matchingRows.Count < 2)
+            var compCol = ResolveComparisonColumn(question, table);
+            if (compCol < 0)
             {
+                // Ambiguity policy: could not reliably resolve comparison column from question and headers.
+                // Refrain from arbitrary conclusion (no false rejection, no arbitrary column).
                 continue;
             }
 
-            var compCol = FindComparisonColumn(matchingRows);
-            if (compCol < 0)
+            var matchingRows = FindFilterMatchingRows(table, question, compCol);
+            if (matchingRows.Count < 2)
             {
                 continue;
             }
@@ -770,27 +820,290 @@ public static partial class EvidenceValidator
         return false;
     }
 
-    private static List<TableRowData> FindFilterMatchingRows(ParsedTable table, string question)
+    internal static int ResolveComparisonColumn(
+        string question,
+        ParsedTable table,
+        IReadOnlyList<TableRowData>? candidateRows = null)
     {
-        var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        if (table.Headers == null || table.Headers.Count == 0 || string.IsNullOrWhiteSpace(question))
         {
-            "какой", "какая", "какое", "какие", "товар", "товары", "объект", "объекты",
-            "модель", "модели", "прибор", "приборы", "датчик", "датчики", "с", "со", "и",
-            "или", "в", "во", "на", "по", "для", "из", "от", "до", "не", "что", "кто", "где",
-            "как", "имеет", "имеют", "указан", "указано", "указаны", "наибольший", "наименьший",
-            "максимальный", "минимальный", "максимум", "минимум", "гарантийный", "срок",
-            "свойство", "значение", "параметр", "характеристика", "the", "a", "an", "which",
-            "what", "has", "have", "with", "maximum", "minimum", "largest", "smallest",
-            "highest", "lowest", "value", "column", "table"
-        };
+            return -1;
+        }
 
+        candidateRows ??= table.Rows;
+        if (candidateRows.Count == 0)
+        {
+            return -1;
+        }
+
+        // 1. Identify valid numeric columns in candidateRows (excluding identifier/model columns)
+        var numericColIndices = new List<int>();
+        for (var c = 0; c < table.Headers.Count; c++)
+        {
+            var numbers = new List<double>();
+            var isEntityCol = false;
+
+            foreach (var r in candidateRows)
+            {
+                if (c < r.Cells.Count)
+                {
+                    var cell = r.Cells[c].Trim();
+                    if (r.EntityKeys.Contains(cell) || ModelIdentifierRegex().IsMatch(cell))
+                    {
+                        isEntityCol = true;
+                        break;
+                    }
+
+                    if (TryParseCellNumber(cell, out var val))
+                    {
+                        numbers.Add(val);
+                    }
+                }
+            }
+
+            if (!isEntityCol && numbers.Count >= Math.Min(2, candidateRows.Count) && numbers.Count > 0)
+            {
+                numericColIndices.Add(c);
+            }
+        }
+
+        if (numericColIndices.Count == 0)
+        {
+            return -1;
+        }
+
+        // 2. Extract comparison target tokens from question (excluding extremum, grammar, and generic entity stopwords)
+        var qTokens = ExtractQuestionComparisonTokens(question);
+        if (qTokens.Count == 0)
+        {
+            // If question does not specify a specific property (e.g. "максимальное значение"):
+            // If exactly one numeric column exists in the table, it is unambiguously the target.
+            // If multiple numeric columns exist, it is ambiguous => return -1 (ambiguity policy).
+            return numericColIndices.Count == 1 ? numericColIndices[0] : -1;
+        }
+
+        // 3. Score candidate numeric columns against question tokens
+        var scoredColumns = new List<(int ColumnIndex, int Score)>();
+        foreach (var colIdx in numericColIndices)
+        {
+            var rawHeader = table.Headers[colIdx];
+            var headerTokens = ExtractHeaderTokens(rawHeader);
+            var score = 0;
+
+            foreach (var hToken in headerTokens)
+            {
+                foreach (var qToken in qTokens)
+                {
+                    if (TokensMatch(hToken, qToken))
+                    {
+                        score += 2;
+                    }
+                }
+            }
+
+            var baseHeader = CleanBaseHeader(rawHeader);
+            if (baseHeader.Length >= 3 && ContainsExactPhrase(question, baseHeader))
+            {
+                score += 3;
+            }
+
+            if (score > 0)
+            {
+                scoredColumns.Add((colIdx, score));
+            }
+        }
+
+        if (scoredColumns.Count == 0)
+        {
+            return -1;
+        }
+
+        // 4. Disambiguation
+        var maxScore = scoredColumns.Max(sc => sc.Score);
+        var winners = scoredColumns.Where(sc => sc.Score == maxScore).ToList();
+
+        // Must have a single clear winner
+        if (winners.Count == 1)
+        {
+            return winners[0].ColumnIndex;
+        }
+
+        // Ambiguity policy: multiple columns tied with top score => unresolved
+        return -1;
+    }
+
+    private static string CleanBaseHeader(string header)
+    {
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return string.Empty;
+        }
+
+        var parts = header.Split([',', '(', '/', '['], 2);
+        return parts[0].Trim();
+    }
+
+    private static List<string> ExtractHeaderTokens(string header)
+    {
+        var baseHeader = CleanBaseHeader(header);
+        if (string.IsNullOrWhiteSpace(baseHeader))
+        {
+            return [];
+        }
+
+        var matches = Regex.Matches(baseHeader, @"\b[\p{L}\p{N}_-]+\b");
+        var tokens = new List<string>();
+        foreach (Match m in matches)
+        {
+            var val = m.Value.ToLowerInvariant();
+            if (val.Length >= 2 && !ComparisonStopWords.Contains(val))
+            {
+                tokens.Add(val);
+            }
+        }
+        return tokens;
+    }
+
+    private static List<string> ExtractQuestionComparisonTokens(string question)
+    {
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            return [];
+        }
+
+        var words = Regex.Matches(question, @"\b[\p{L}\p{N}_-]+\b")
+                         .Select(m => m.Value)
+                         .ToList();
+
+        var extIdx = -1;
+        for (var i = 0; i < words.Count; i++)
+        {
+            if (IsExtremumToken(words[i]))
+            {
+                extIdx = i;
+                break;
+            }
+        }
+
+        var tokens = new List<string>();
+
+        if (extIdx >= 0)
+        {
+            if (extIdx + 1 < words.Count)
+            {
+                // Target follows extremum keyword (e.g. "наибольший гарантийный срок", "максимальный ресурс", "максимальное значение")
+                for (var i = extIdx + 1; i < Math.Min(words.Count, extIdx + 4); i++)
+                {
+                    var val = words[i].ToLowerInvariant();
+                    if (val.Length >= 2 && !ComparisonStopWords.Contains(val))
+                    {
+                        tokens.Add(val);
+                    }
+                }
+            }
+            else
+            {
+                // Extremum keyword is at the end of the question (e.g. "мощность наибольшая?")
+                for (var i = extIdx - 1; i >= Math.Max(0, extIdx - 3); i--)
+                {
+                    var val = words[i].ToLowerInvariant();
+                    if (val.Length >= 2 && !ComparisonStopWords.Contains(val))
+                    {
+                        tokens.Add(val);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // If no explicit extremum keyword located, extract all non-stopwords
+            foreach (var w in words)
+            {
+                var val = w.ToLowerInvariant();
+                if (val.Length >= 2 && !ComparisonStopWords.Contains(val))
+                {
+                    tokens.Add(val);
+                }
+            }
+        }
+
+        return tokens;
+    }
+
+    private static bool IsExtremumToken(string word)
+    {
+        var lower = word.ToLowerInvariant();
+        return lower.StartsWith("наибольш", StringComparison.Ordinal) ||
+               lower.StartsWith("наименьш", StringComparison.Ordinal) ||
+               lower.StartsWith("максимальн", StringComparison.Ordinal) ||
+               lower.StartsWith("минимальн", StringComparison.Ordinal) ||
+               lower == "максимум" ||
+               lower == "минимум" ||
+               lower == "maximum" ||
+               lower == "minimum" ||
+               lower == "max" ||
+               lower == "min" ||
+               lower == "largest" ||
+               lower == "smallest" ||
+               lower == "highest" ||
+               lower == "lowest" ||
+               lower == "greatest" ||
+               lower == "least";
+    }
+
+    private static bool TokensMatch(string t1, string t2)
+    {
+        if (string.Equals(t1, t2, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var s1 = t1.ToLowerInvariant();
+        var s2 = t2.ToLowerInvariant();
+
+        var minLen = Math.Min(s1.Length, s2.Length);
+        if (minLen < 3)
+        {
+            return false;
+        }
+
+        var commonPrefixLen = 0;
+        while (commonPrefixLen < minLen && s1[commonPrefixLen] == s2[commonPrefixLen])
+        {
+            commonPrefixLen++;
+        }
+
+        // 1. Meaningful common stem prefix of at least 4 characters
+        // e.g. "гаранти" in "гарантия"/"гарантийный", "мощност" in "мощность", "масс" in "масса"/"массу", "ресурс" in "ресурс"/"ресурса"
+        if (commonPrefixLen >= 4)
+        {
+            return true;
+        }
+
+        // 2. Short 3-character stem for concise root words differing only by inflectional ending
+        // e.g. "цен" in "цена"/"цену", "вес" in "вес"/"веса", "ток" in "ток"/"тока"
+        if (commonPrefixLen == 3 && s1.Length <= 4 && s2.Length <= 4)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static List<TableRowData> FindFilterMatchingRows(ParsedTable table, string question, int excludedCol = -1)
+    {
         var matchedTerms = new List<string>();
         foreach (var row in table.Rows)
         {
-            foreach (var cell in row.Cells)
+            for (var c = 0; c < row.Cells.Count; c++)
             {
-                var cellTrimmed = cell.Trim();
-                if (cellTrimmed.Length >= 2 && !stopWords.Contains(cellTrimmed) && ContainsExactPhrase(question, cellTrimmed))
+                if (excludedCol >= 0 && c == excludedCol)
+                {
+                    continue;
+                }
+
+                var cellTrimmed = row.Cells[c].Trim();
+                if (cellTrimmed.Length >= 1 && char.IsLetterOrDigit(cellTrimmed[0]) && !ComparisonStopWords.Contains(cellTrimmed) && ContainsExactPhrase(question, cellTrimmed))
                 {
                     if (!matchedTerms.Contains(cellTrimmed, StringComparer.OrdinalIgnoreCase))
                     {
@@ -802,15 +1115,29 @@ public static partial class EvidenceValidator
 
         if (matchedTerms.Count == 0)
         {
-            var qWords = Regex.Matches(question, @"\b[A-Za-zА-Яа-я0-9_-]{3,}\b")
+            var qWords = Regex.Matches(question, @"\b[\p{L}\p{N}_-]+\b")
                               .Select(m => m.Value)
-                              .Where(w => !stopWords.Contains(w))
+                              .Where(w => w.Length >= 1 && char.IsLetterOrDigit(w[0]) && !ComparisonStopWords.Contains(w))
                               .Distinct(StringComparer.OrdinalIgnoreCase)
                               .ToList();
 
             foreach (var w in qWords)
             {
-                if (table.Rows.Any(r => r.Cells.Any(c => ContainsExactWord(c, w))))
+                if (table.Rows.Any(r =>
+                {
+                    for (var c = 0; c < r.Cells.Count; c++)
+                    {
+                        if (excludedCol >= 0 && c == excludedCol)
+                        {
+                            continue;
+                        }
+                        if (ContainsExactWord(r.Cells[c], w))
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                }))
                 {
                     matchedTerms.Add(w);
                 }
@@ -819,7 +1146,22 @@ public static partial class EvidenceValidator
 
         if (matchedTerms.Count > 0)
         {
-            var filtered = table.Rows.Where(r => matchedTerms.Any(t => r.Cells.Any(c => c.Contains(t, StringComparison.OrdinalIgnoreCase)))).ToList();
+            var filtered = table.Rows.Where(r => matchedTerms.Any(t =>
+            {
+                for (var c = 0; c < r.Cells.Count; c++)
+                {
+                    if (excludedCol >= 0 && c == excludedCol)
+                    {
+                        continue;
+                    }
+                    if (ContainsExactWord(r.Cells[c], t) || r.Cells[c].Contains(t, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            })).ToList();
+
             if (filtered.Count >= 2)
             {
                 return filtered;
@@ -827,44 +1169,6 @@ public static partial class EvidenceValidator
         }
 
         return [.. table.Rows];
-    }
-
-    private static int FindComparisonColumn(List<TableRowData> rows)
-    {
-        var numCols = rows[0].Cells.Count;
-        for (var c = numCols - 1; c >= 0; c--)
-        {
-            var numbers = new List<double>();
-            foreach (var r in rows)
-            {
-                if (c < r.Cells.Count && TryParseCellNumber(r.Cells[c], out var num))
-                {
-                    numbers.Add(num);
-                }
-            }
-            if (numbers.Count == rows.Count && numbers.Distinct().Count() > 1)
-            {
-                return c;
-            }
-        }
-
-        for (var c = 0; c < numCols; c++)
-        {
-            var numbers = new List<double>();
-            foreach (var r in rows)
-            {
-                if (c < r.Cells.Count && TryParseCellNumber(r.Cells[c], out var num))
-                {
-                    numbers.Add(num);
-                }
-            }
-            if (numbers.Count >= 2 && numbers.Distinct().Count() > 1)
-            {
-                return c;
-            }
-        }
-
-        return -1;
     }
 
     private static bool TryParseCellNumber(string text, out double number)
@@ -889,21 +1193,27 @@ public static partial class EvidenceValidator
         IReadOnlyList<Citation> citations,
         string? question)
     {
-        var tables = ExtractTables(citations);
-        if (tables.Count == 0 || string.IsNullOrWhiteSpace(question))
+        if (string.IsNullOrWhiteSpace(question))
         {
             return (true, null);
         }
 
-        // If the question is an extremum or filter over a structured table
-        if (IsExtremumQuestion(question, out _) && (question.Contains("гаранти", StringComparison.OrdinalIgnoreCase) || question.Contains("цен", StringComparison.OrdinalIgnoreCase)))
+        var tables = ExtractTables(citations);
+        if (tables.Count == 0)
         {
-            var hasRelevantTable = tables.Any(t =>
-                (t.Headers != null && t.Headers.Any(h => h.Contains("гаранти", StringComparison.OrdinalIgnoreCase) || h.Contains("цен", StringComparison.OrdinalIgnoreCase))) ||
-                t.Rows.Any(r => r.Cells.Any(c => c.Contains("гаранти", StringComparison.OrdinalIgnoreCase) || c.Contains("мес", StringComparison.OrdinalIgnoreCase))));
-            if (!hasRelevantTable)
+            return (true, null);
+        }
+
+        if (IsExtremumQuestion(question, out _))
+        {
+            var qTokens = ExtractQuestionComparisonTokens(question);
+            if (qTokens.Count > 0)
             {
-                return (false, "Цитируемые источники не содержат таблицу с запрошенными характеристиками (гарантия/цена)");
+                var hasRelevantTable = tables.Any(t => ResolveComparisonColumn(question, t) >= 0);
+                if (!hasRelevantTable)
+                {
+                    return (false, "Цитируемые источники не содержат таблицу с характеристиками, запрошенными для сравнения");
+                }
             }
         }
 

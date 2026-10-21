@@ -551,7 +551,8 @@ public sealed class DogfoodingCorrectiveHardeningTests
         var question = "Какой объект с протоколом protocol X имеет максимальное значение?";
 
         var optimalAnswer = "Объект C с протоколом protocol X имеет максимальное значение 30 [S1].";
-        Assert.True(EvidenceValidator.ValidateEvidence(optimalAnswer, [citation], question));
+        var (isOptValid, optReason) = EvidenceValidator.ValidateEvidenceWithReason(optimalAnswer, [citation], question);
+        Assert.True(isOptValid, optReason);
 
         var suboptimalAnswer = "Объект A с протоколом protocol X имеет максимальное значение 12 [S1].";
         var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(suboptimalAnswer, [citation], question);
@@ -607,6 +608,151 @@ public sealed class DogfoodingCorrectiveHardeningTests
         var implicitCorrectAnswer = "Стоимость до скидки: 100 руб. × 5 = 500 руб. [S1]";
         var (isCorrectValid, _) = EvidenceValidator.ValidateEvidenceWithReason(implicitCorrectAnswer, [citation], question);
         Assert.True(isCorrectValid);
+    }
+
+    [Fact]
+    public void TestA_TargetNumericColumn_IsNotLast_SelectedCorrectly()
+    {
+        var meta = new DocumentMetadata("tab-a", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Гарантия, мес. | Цена |
+            | --- | --- | --- |
+            | A-100 | 36 | 100 |
+            | B-200 | 24 | 500 |
+            """;
+        var citation = new Citation(1, "tab-a", "tab-a#1", "Catalog", snippet, meta);
+        var question = "Какая модель имеет максимальный гарантийный срок?";
+
+        var correct = "Модель A-100 имеет максимальный гарантийный срок 36 месяцев [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(correct, [citation], question));
+
+        var suboptimal = "Модель B-200 имеет максимальный гарантийный срок 24 месяца [S1].";
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(suboptimal, [citation], question);
+        Assert.False(isValid);
+        Assert.Contains("extremum violation", reason);
+    }
+
+    [Fact]
+    public void TestB_GenericArbitraryColumn_PowerNotYear()
+    {
+        var meta = new DocumentMetadata("tab-b", Silo: "specs", "", "", "", "Specs", 2026, "", DateOnly.MinValue, "Specs");
+        var snippet = """
+            | Устройство | Мощность, Вт | Год |
+            | --- | --- | --- |
+            | X-100 | 250 | 2024 |
+            | Y-200 | 400 | 2020 |
+            """;
+        var citation = new Citation(1, "tab-b", "tab-b#1", "Specs", snippet, meta);
+        var question = "Какое устройство имеет наибольшую мощность?";
+
+        var correct = "Устройство Y-200 имеет наибольшую мощность 400 Вт [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(correct, [citation], question));
+
+        var suboptimal = "Устройство X-100 имеет наибольшую мощность 250 Вт [S1].";
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(suboptimal, [citation], question);
+        Assert.False(isValid);
+        Assert.Contains("extremum violation", reason);
+    }
+
+    [Fact]
+    public void TestC_MinimumOperation_SelectsSmallest()
+    {
+        var meta = new DocumentMetadata("tab-c", Silo: "specs", "", "", "", "Specs", 2026, "", DateOnly.MinValue, "Specs");
+        var snippet = """
+            | Прибор | Масса, кг | Цена |
+            | --- | --- | --- |
+            | X-100 | 8 | 100 |
+            | Y-200 | 5 | 500 |
+            """;
+        var citation = new Citation(1, "tab-c", "tab-c#1", "Specs", snippet, meta);
+        var question = "Какой прибор имеет минимальную массу?";
+
+        var correct = "Прибор Y-200 имеет минимальную массу 5 кг [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(correct, [citation], question));
+
+        var suboptimal = "Прибор X-100 имеет минимальную массу 8 кг [S1].";
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(suboptimal, [citation], question);
+        Assert.False(isValid);
+        Assert.Contains("extremum violation", reason);
+    }
+
+    [Fact]
+    public void TestD_FilterPlusComparison_ExcludesMismatchedAndSelectsTarget()
+    {
+        var meta = new DocumentMetadata("tab-d", Silo: "specs", "", "", "", "Specs", 2026, "", DateOnly.MinValue, "Specs");
+        var snippet = """
+            | Модель | Протокол | Ресурс, ч | Цена |
+            | --- | --- | --- | --- |
+            | A-100 | X | 1000 | 900 |
+            | B-200 | Y | 5000 | 800 |
+            | C-300 | X | 3000 | 700 |
+            """;
+        var citation = new Citation(1, "tab-d", "tab-d#1", "Specs", snippet, meta);
+        var question = "Какая модель с протоколом X имеет максимальный ресурс?";
+
+        var correct = "Модель C-300 с протоколом X имеет максимальный ресурс 3000 ч [S1].";
+        var (isCorValid, corReason) = EvidenceValidator.ValidateEvidenceWithReason(correct, [citation], question);
+        Assert.True(isCorValid, corReason);
+
+        var suboptimal = "Модель A-100 с протоколом X имеет максимальный ресурс 1000 ч [S1].";
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(suboptimal, [citation], question);
+        Assert.False(isValid);
+        Assert.Contains("extremum violation", reason);
+    }
+
+    [Fact]
+    public void TestE_UnresolvedAmbiguity_RefrainsFromArbitraryChoice()
+    {
+        var meta = new DocumentMetadata("tab-e", Silo: "specs", "", "", "", "Specs", 2026, "", DateOnly.MinValue, "Specs");
+        var snippet = """
+            | Модель | Параметр A | Параметр B |
+            | --- | --- | --- |
+            | A-100 | 10 | 100 |
+            | B-200 | 20 | 50 |
+            """;
+        var citation = new Citation(1, "tab-e", "tab-e#1", "Specs", snippet, meta);
+        var question = "Какая модель имеет максимальное значение?";
+
+        var answer = "Модель B-200 имеет максимальное значение [S1].";
+        // Ambiguity policy: does NOT make an arbitrary guess, does NOT falsely reject
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+        Assert.True(isValid);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void TestF_CitationFidelityGeneric_RejectsIrrelevantTableAndAcceptsRelevant()
+    {
+        var meta1 = new DocumentMetadata("tab-f1", Silo: "specs", "", "", "", "Specs", 2026, "", DateOnly.MinValue, "Specs");
+        var snippet1 = """
+            | Устройство | Год |
+            | --- | --- |
+            | X-100 | 2024 |
+            | Y-200 | 2020 |
+            """;
+        var citation1 = new Citation(1, "tab-f1", "tab-f1#1", "Specs", snippet1, meta1);
+
+        var meta2 = new DocumentMetadata("tab-f2", Silo: "specs", "", "", "", "Specs", 2026, "", DateOnly.MinValue, "Specs");
+        var snippet2 = """
+            | Устройство | Мощность, Вт |
+            | --- | --- |
+            | X-100 | 250 |
+            | Y-200 | 400 |
+            """;
+        var citation2 = new Citation(2, "tab-f2", "tab-f2#1", "Specs", snippet2, meta2);
+
+        var question = "Какое устройство имеет максимальную мощность?";
+
+        // If only citation 1 (with year) is cited: fails citation fidelity
+        var answerCitingOnlyYear = "Устройство Y-200 имеет максимальную мощность 400 Вт [S1].";
+        var (isCit1Valid, cit1Reason) = EvidenceValidator.ValidateEvidenceWithReason(answerCitingOnlyYear, [citation1], question);
+        Assert.False(isCit1Valid);
+        Assert.Contains("характеристиками, запрошенными для сравнения", cit1Reason);
+
+        // If citation 2 (with power) is cited: passes citation fidelity
+        var answerCitingPower = "Устройство Y-200 имеет максимальную мощность 400 Вт [S2].";
+        var (isCit2Valid, _) = EvidenceValidator.ValidateEvidenceWithReason(answerCitingPower, [citation2], question);
+        Assert.True(isCit2Valid);
     }
 
     private sealed class CountingStaticChatClient : IChatClient
