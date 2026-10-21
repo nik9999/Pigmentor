@@ -44,6 +44,26 @@ public static partial class EvidenceValidator
         RegexOptions.IgnoreCase)]
     private static partial Regex ArithmeticMultiplicationRegex();
 
+    [GeneratedRegex(
+        @"(?:(?:скидк\w*|discount\w*)\s*(?:составляет|\bравна\b|[:—–\-])?\s*(?<pct>\d+(?:[\.,]\d+)?)\s*%|(?<pct>\d+(?:[\.,]\d+)?)\s*%\s*(?:скидк\w*|discount\w*))",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex ClaimedDiscountPercentRegex();
+
+    [GeneratedRegex(
+        @"(?<subtotal>\d[\d\s]*\d|\d+)(?:[\.,]\d{1,2})?\s*(?:руб\w*\.?|\$|€|₽)?\s*(?:×|\*|x|х)\s*(?:\(\s*1\s*-\s*(?<dec>0?[\.,]\d+)\s*\)|(?<mult>0?[\.,]\d+))\s*=\s*(?<res>\d[\d\s]*\d|\d+)(?:[\.,]\d{1,2})?\s*(?:руб\w*\.?|\$|€|₽)?",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex DiscountMultiplicationRegex();
+
+    [GeneratedRegex(
+        @"(?<subtotal>\d[\d\s]*\d|\d+)(?:[\.,]\d{1,2})?\s*(?:руб\w*\.?|\$|€|₽)?\s*(?:-|—|–)\s*(?<discount>\d[\d\s]*\d|\d+)(?:[\.,]\d{1,2})?\s*(?:руб\w*\.?|\$|€|₽)?\s*=\s*(?<res>\d[\d\s]*\d|\d+)(?:[\.,]\d{1,2})?\s*(?:руб\w*\.?|\$|€|₽)?",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex DiscountSubtractionRegex();
+
+    [GeneratedRegex(
+        @"(?:(?:стоимост\w*|цена|итог\w*)\s+(?:заказа\s+)?(?:после\s+(?:применения\s+)?скидк\w*|со\s+скидк\w*|с\s+учетом\s+скидк\w*|с\s+учётом\s+скидк\w*)|(?:после\s+(?:применения\s+)?скидк\w*|со\s+скидк\w*|с\s+учетом\s+скидк\w*|с\s+учётом\s+скидк\w*))\s*(?:\([^)]*\))?\s*(?:[:—–\-]|составляет|\bравна\b|\bбудет\b)?\s*(?<val>\d[\d\s]{1,}\d|\d+)(?:[\.,]\d{1,2})?\b(?!\s*(?:руб\w*\.?|\$|€|₽)?\s*(?:×|\*|x|х|-|—|–))\s*(?:руб\w*\.?|\$|€|₽)?",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex ClaimedFinalTotalPhraseRegex();
+
     private static readonly HashSet<string> ExcludedIdentifiers = new(StringComparer.OrdinalIgnoreCase)
     {
         "RS-485", "RS-232", "MODBUS-RTU", "MODBUS-TCP", "MODBUS"
@@ -162,6 +182,13 @@ public static partial class EvidenceValidator
         if (!isSubtotalValid)
         {
             return (false, subtotalReason);
+        }
+
+        // 3c. Calculation discount verification (grounded discount percent and final total)
+        var (isDiscountValid, discountReason) = ValidateCalculationDiscount(answer, tables, question);
+        if (!isDiscountValid)
+        {
+            return (false, discountReason);
         }
 
         // 4. Structured table extremum fidelity (filter + max/min)
@@ -1585,6 +1612,237 @@ public static partial class EvidenceValidator
                 if (phraseAmount != expectedSubtotal)
                 {
                     return (false, $"Заявленная стоимость до скидки {phraseAmount:0.##} не соответствует расчёту {expectedUnitPrice:0.##} × {expectedQty} = {expectedSubtotal:0.##}");
+                }
+
+                return (true, null);
+            }
+        }
+
+        return (true, null);
+    }
+
+    private static (bool IsValid, string? Reason) ValidateCalculationDiscount(
+        string answer,
+        IReadOnlyList<ParsedTable> tables,
+        string? question)
+    {
+        if (string.IsNullOrWhiteSpace(question) || !IsCalculationQuestion(question))
+        {
+            return (true, null);
+        }
+
+        var requestedModels = FindRequestedModelIdentifiers(question);
+        if (requestedModels.Count == 0)
+        {
+            return (true, null);
+        }
+
+        foreach (var modelId in requestedModels)
+        {
+            var qty = ExtractRequestedQuantity(question, modelId);
+            if (qty == null || qty.Value <= 0)
+            {
+                continue;
+            }
+
+            decimal? resolvedUnitPrice = null;
+            foreach (var table in tables)
+            {
+                if (TryResolveUnitPrice(table, modelId, out var up))
+                {
+                    resolvedUnitPrice = up;
+                    break;
+                }
+            }
+
+            if (resolvedUnitPrice == null)
+            {
+                continue;
+            }
+
+            var subtotal = resolvedUnitPrice.Value * qty.Value;
+
+            var applicableDiscount = ResolveApplicableDiscountPercent(tables, qty.Value);
+            if (applicableDiscount == null || applicableDiscount.Value <= 0m)
+            {
+                continue;
+            }
+
+            var expectedDiscountPercent = applicableDiscount.Value;
+            var discountAmount = subtotal * expectedDiscountPercent / 100m;
+            var expectedFinal = subtotal - discountAmount;
+
+            var (isDiscountValid, discountReason) = VerifyClaimedDiscount(
+                answer,
+                modelId,
+                subtotal,
+                expectedDiscountPercent,
+                discountAmount,
+                expectedFinal);
+
+            if (!isDiscountValid)
+            {
+                return (false, discountReason);
+            }
+        }
+
+        return (true, null);
+    }
+
+    private static decimal? ResolveApplicableDiscountPercent(
+        IReadOnlyList<ParsedTable> tables,
+        int quantity)
+    {
+        var applicableRules = new List<(int Threshold, decimal Percent)>();
+
+        foreach (var table in tables)
+        {
+            foreach (var row in table.Rows)
+            {
+                var fullRowText = string.Join(" | ", row.Cells);
+                var condMatch = Regex.Match(
+                    fullRowText,
+                    @"(?:скидк\w*\s+от|discount\s+from)\s+(?<thresh>\d+)\s*(?:единиц\w*|штук\w*|шт\.?|прибор\w*|датчик\w*|устройств\w*|модел\w*|товар\w*|units?|pieces?|pcs?|items?)",
+                    RegexOptions.IgnoreCase);
+
+                if (!condMatch.Success)
+                {
+                    continue;
+                }
+
+                if (!int.TryParse(condMatch.Groups["thresh"].Value, out var threshold) || threshold <= 0)
+                {
+                    continue;
+                }
+
+                var pctMatch = Regex.Match(fullRowText, @"\b(?<pct>\d+(?:[\.,]\d+)?)\s*%", RegexOptions.IgnoreCase);
+                if (!pctMatch.Success)
+                {
+                    continue;
+                }
+
+                if (decimal.TryParse(pctMatch.Groups["pct"].Value.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out var pct) && pct > 0m && pct < 100m)
+                {
+                    if (quantity >= threshold)
+                    {
+                        applicableRules.Add((threshold, pct));
+                    }
+                }
+            }
+        }
+
+        if (applicableRules.Count == 0)
+        {
+            return null;
+        }
+
+        if (applicableRules.Count == 1)
+        {
+            return applicableRules[0].Percent;
+        }
+
+        var maxThreshold = applicableRules.Max(r => r.Threshold);
+        var bestRules = applicableRules.Where(r => r.Threshold == maxThreshold).ToList();
+        if (bestRules.Count == 1)
+        {
+            return bestRules[0].Percent;
+        }
+
+        return null;
+    }
+
+    private static (bool IsValid, string? Reason) VerifyClaimedDiscount(
+        string answer,
+        string modelId,
+        decimal expectedSubtotal,
+        decimal expectedDiscountPercent,
+        decimal expectedDiscountAmount,
+        decimal expectedFinal)
+    {
+        // 1. Check stated discount percentage in answer
+        foreach (Match m in ClaimedDiscountPercentRegex().Matches(answer))
+        {
+            var pctStr = m.Groups["pct"].Value.Replace(',', '.');
+            if (decimal.TryParse(pctStr, NumberStyles.Number, CultureInfo.InvariantCulture, out var claimedPct))
+            {
+                if (claimedPct != expectedDiscountPercent)
+                {
+                    return (false, $"Заявленный процент скидки {claimedPct:0.##}% не соответствует условиям в документе ({expectedDiscountPercent:0.##}%)");
+                }
+            }
+        }
+
+        // 2. Check discount multiplication formula: "98000 × (1 - 0.07) = 91260" or "98000 × 0.93 = 91140"
+        foreach (Match m in DiscountMultiplicationRegex().Matches(answer))
+        {
+            if (TryParsePriceDecimal(m.Groups["subtotal"].Value, out var sub) && sub == expectedSubtotal &&
+                TryParsePriceDecimal(m.Groups["res"].Value, out var res))
+            {
+                if (m.Groups["dec"].Success)
+                {
+                    var decStr = m.Groups["dec"].Value.Replace(',', '.');
+                    if (decimal.TryParse(decStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var dec))
+                    {
+                        var usedPct = dec * 100m;
+                        if (usedPct != expectedDiscountPercent)
+                        {
+                            return (false, $"В расчёте скидки использован коэффициент, соответствующий {usedPct:0.##}%, но в документе указана скидка {expectedDiscountPercent:0.##}%");
+                        }
+                    }
+                }
+                else if (m.Groups["mult"].Success)
+                {
+                    var multStr = m.Groups["mult"].Value.Replace(',', '.');
+                    if (decimal.TryParse(multStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var mult) && mult > 0m && mult < 1m)
+                    {
+                        var usedPct = (1m - mult) * 100m;
+                        if (Math.Abs(usedPct - expectedDiscountPercent) > 0.01m)
+                        {
+                            return (false, $"В расчёте скидки использован коэффициент, соответствующий {usedPct:0.##}%, но в документе указана скидка {expectedDiscountPercent:0.##}%");
+                        }
+                    }
+                }
+
+                if (res != expectedFinal)
+                {
+                    return (false, $"Заявленная стоимость после скидки {res:0.##} не соответствует расчёту {expectedSubtotal:0.##} с применением скидки {expectedDiscountPercent:0.##}%: ожидается {expectedFinal:0.##}");
+                }
+
+                return (true, null);
+            }
+        }
+
+        // 3. Check discount subtraction formula: "98000 - 6860 = 91140"
+        foreach (Match m in DiscountSubtractionRegex().Matches(answer))
+        {
+            if (TryParsePriceDecimal(m.Groups["subtotal"].Value, out var sub) && sub == expectedSubtotal &&
+                TryParsePriceDecimal(m.Groups["discount"].Value, out var disc) &&
+                TryParsePriceDecimal(m.Groups["res"].Value, out var res))
+            {
+                if (disc != expectedDiscountAmount)
+                {
+                    return (false, $"Заявленный размер скидки {disc:0.##} не соответствует расчёту {expectedSubtotal:0.##} × {expectedDiscountPercent:0.##}% = {expectedDiscountAmount:0.##}");
+                }
+
+                if (res != expectedFinal)
+                {
+                    return (false, $"Заявленная стоимость после скидки {res:0.##} не соответствует расчёту {expectedSubtotal:0.##} с применением скидки {expectedDiscountPercent:0.##}%: ожидается {expectedFinal:0.##}");
+                }
+
+                return (true, null);
+            }
+        }
+
+        // 4. Check explicit final total phrase: "После скидки: 91140 руб.", "Стоимость после скидки: 91140 руб."
+        var phraseMatch = ClaimedFinalTotalPhraseRegex().Match(answer);
+        if (phraseMatch.Success)
+        {
+            var rawVal = phraseMatch.Groups["val"].Value;
+            if (TryParsePriceDecimal(rawVal, out var phraseAmount))
+            {
+                if (phraseAmount != expectedFinal)
+                {
+                    return (false, $"Заявленная стоимость после скидки {phraseAmount:0.##} не соответствует расчёту {expectedSubtotal:0.##} с применением скидки {expectedDiscountPercent:0.##}%: ожидается {expectedFinal:0.##}");
                 }
 
                 return (true, null);

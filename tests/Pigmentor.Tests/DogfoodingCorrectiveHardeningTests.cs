@@ -1006,6 +1006,150 @@ public sealed class DogfoodingCorrectiveHardeningTests
         Assert.Null(reason);
     }
 
+    [Fact]
+    public void CalculationDiscount_CorrectFinalTotal_PassesValidation()
+    {
+        var catMeta = new DocumentMetadata("doc-cat1", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var catSnippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            """;
+        var citationCat = new Citation(1, "doc-cat1", "doc-cat1#1", "Catalog", catSnippet, catMeta);
+
+        var condMeta = new DocumentMetadata("doc-cond1", Silo: "catalog", "", "", "", "Conditions", 2026, "", DateOnly.MinValue, "Conditions");
+        var condSnippet = """
+            | Условие | Скидка |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            """;
+        var citationCond = new Citation(2, "doc-cond1", "doc-cond1#1", "Conditions", condSnippet, condMeta);
+
+        var question = "Если заказать 5 датчиков TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
+        var answer = "Стоимость до скидки: 98000 руб. [S1]. Стоимость после скидки (7%): 91140 руб. (98000 * 0.93) [S2]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citationCat, citationCond], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void CalculationDiscount_RealRegressionArithmeticError_FailsValidation()
+    {
+        var catMeta = new DocumentMetadata("doc-cat2", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var catSnippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            """;
+        var citationCat = new Citation(1, "doc-cat2", "doc-cat2#1", "Catalog", catSnippet, catMeta);
+
+        var condMeta = new DocumentMetadata("doc-cond2", Silo: "catalog", "", "", "", "Conditions", 2026, "", DateOnly.MinValue, "Conditions");
+        var condSnippet = """
+            | Условие | Скидка |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            """;
+        var citationCond = new Citation(2, "doc-cond2", "doc-cond2#1", "Conditions", condSnippet, condMeta);
+
+        var question = "Если заказать 5 датчиков TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
+        var answer = "Стоимость до скидки: 98000 руб. [S1]. Стоимость после скидки: 98000 × (1 - 0.07) = 91260 руб. [S2]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citationCat, citationCond], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("91140", reason);
+    }
+
+    [Fact]
+    public void CalculationDiscount_WrongDiscountPercentClaimed_FailsValidation()
+    {
+        var catMeta = new DocumentMetadata("doc-cat3", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var catSnippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            """;
+        var citationCat = new Citation(1, "doc-cat3", "doc-cat3#1", "Catalog", catSnippet, catMeta);
+
+        var condMeta = new DocumentMetadata("doc-cond3", Silo: "catalog", "", "", "", "Conditions", 2026, "", DateOnly.MinValue, "Conditions");
+        var condSnippet = """
+            | Условие | Скидка |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            | Скидка от 10 единиц одной модели | 10 % |
+            """;
+        var citationCond = new Citation(2, "doc-cond3", "doc-cond3#1", "Conditions", condSnippet, condMeta);
+
+        var question = "Если заказать 5 датчиков TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
+        var answer = "Стоимость до скидки: 98000 руб. [S1]. Скидка составляет 10%: стоимость после скидки 88200 руб. [S2]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citationCat, citationCond], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("10%", reason);
+        Assert.Contains("7%", reason);
+    }
+
+    [Fact]
+    public void CalculationDiscount_ThresholdApplies_PassesValidation()
+    {
+        var catMeta = new DocumentMetadata("doc-cat4", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var catSnippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            """;
+        var citationCat = new Citation(1, "doc-cat4", "doc-cat4#1", "Catalog", catSnippet, catMeta);
+
+        var condMeta = new DocumentMetadata("doc-cond4", Silo: "catalog", "", "", "", "Conditions", 2026, "", DateOnly.MinValue, "Conditions");
+        var condSnippet = """
+            | Условие | Скидка |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            """;
+        var citationCond = new Citation(2, "doc-cond4", "doc-cond4#1", "Conditions", condSnippet, condMeta);
+
+        var question = "Если заказать 5 датчиков TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
+        var answer = "19600 × 5 = 98000 руб. [S1]. 98000 - 6860 = 91140 руб. [S2]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citationCat, citationCond], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void CalculationDiscount_ThresholdDoesNotApply_UnresolvedDoesNotFalselyReject()
+    {
+        var catMeta = new DocumentMetadata("doc-cat5", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var catSnippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            """;
+        var citationCat = new Citation(1, "doc-cat5", "doc-cat5#1", "Catalog", catSnippet, catMeta);
+
+        var condMeta = new DocumentMetadata("doc-cond5", Silo: "catalog", "", "", "", "Conditions", 2026, "", DateOnly.MinValue, "Conditions");
+        var condSnippet = """
+            | Условие | Скидка |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            """;
+        var citationCond = new Citation(2, "doc-cond5", "doc-cond5#1", "Conditions", condSnippet, condMeta);
+
+        var question = "Если заказать 4 датчика TM-200, какая будет стоимость до скидки и после применения указанной в документе скидки?";
+        var answer = "Стоимость: 19600 × 4 = 78400 руб. [S1]. Скидка от 5 единиц не применяется к заказу из 4 датчиков [S2].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citationCat, citationCond], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
     private sealed class CountingStaticChatClient : IChatClient
     {
         private readonly string _response;
