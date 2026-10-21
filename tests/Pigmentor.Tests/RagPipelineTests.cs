@@ -528,6 +528,22 @@ public sealed class RagPipelineTests
     }
 
     [Fact]
+    public async Task CyrillicCitationTags_MappedToCanonicalSources()
+    {
+        var meta = new DocumentMetadata("doc-1", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc 1");
+        var chunk = new DocumentChunk("doc-1#0", "doc-1", 0, "Chunk 1", 0, 7, meta);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 0.9)]);
+        // Russian Cyrillic 'С' (U+0421) in [С1]
+        var chat = new FakeChatGenerator("Факт из источника [\u04211].");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        var response = await pipeline.AskAsync(new RagRequest("Query"));
+        Assert.Single(response.Citations);
+        Assert.Equal("S1", response.Citations[0].Label);
+        Assert.Equal("doc-1#0", response.Citations[0].ChunkId);
+    }
+
+    [Fact]
     public async Task BudgetConstraint_OnlyFittingSourcesAdmitted_AndInvariantHolds()
     {
         var counter = new TokenCounter();

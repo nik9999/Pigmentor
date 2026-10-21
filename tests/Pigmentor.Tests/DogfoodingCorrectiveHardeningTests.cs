@@ -412,6 +412,41 @@ public sealed class DogfoodingCorrectiveHardeningTests
     }
 
     [Fact]
+    public void TableEnumerationPromptContract_ExplicitlyInstructsExhaustiveCompletenessAndNoCategoryLeakage()
+    {
+        var normalPrompt = RagPromptBuilder.BuildPrompt("Перечисли только диапазоны измерения тока из таблицы 2.1.", RagContext.Empty);
+        Assert.Contains("Если вопрос требует перечислить значения, диапазоны или строки таблицы", normalPrompt, StringComparison.Ordinal);
+        Assert.Contains("включи все строки запрошенной категории полностью", normalPrompt, StringComparison.Ordinal);
+        Assert.Contains("не останавливайся после первого совпадения", normalPrompt, StringComparison.Ordinal);
+        Assert.Contains("не включай строки других категорий", normalPrompt, StringComparison.Ordinal);
+
+        var retryPrompt = RagPromptBuilder.BuildRetryPrompt("Перечисли только диапазоны измерения тока из таблицы 2.1.", RagContext.Empty, "предыдущий ответ");
+        Assert.Contains("Если вопрос требует перечислить значения или строки таблицы", retryPrompt, StringComparison.Ordinal);
+        Assert.Contains("ВСЕ строки запрошенной категории полностью", retryPrompt, StringComparison.Ordinal);
+        Assert.Contains("не включай другие категории", retryPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EvidenceValidator_AcceptsDecimalPercentagesAndUnits_WithCommaOrDot()
+    {
+        var meta = new DocumentMetadata("doc-pct", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
+        var chunk = new DocumentChunk(
+            "doc-pct#1",
+            "doc-pct",
+            0,
+            "Основная погрешность составляет не более 0,1 % во всем диапазоне. Напряжение 0,5 В.",
+            0,
+            100,
+            meta);
+        var citation = new Citation(1, "doc-pct", "doc-pct#1", "MDS AI-8UI", chunk.Text, meta);
+
+        // Grounded with comma
+        Assert.True(EvidenceValidator.ValidateEvidence("Основная погрешность: 0,1 % [S1], напряжение 0,5 В [S1].", [citation]));
+        // Grounded with dot
+        Assert.True(EvidenceValidator.ValidateEvidence("Основная погрешность: 0.1 % [S1], напряжение 0.5 В [S1].", [citation]));
+    }
+
+    [Fact]
     public async Task BoundedRetry_RetriesAtMostOnce_AndFailsSafelyIfStillUnsatisfied()
     {
         var meta = new DocumentMetadata("doc1", "", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "Doc");

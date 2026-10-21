@@ -110,8 +110,8 @@ public static partial class EvidenceValidator
                 continue;
             }
 
-            var number = m.Groups[1].Value.Replace(',', '.');
-            var percentPattern = @"\b" + Regex.Escape(number) + @"\s*%";
+            var numPattern = BuildDecimalRegexPattern(m.Groups[1].Value);
+            var percentPattern = @"\b" + numPattern + @"\s*%";
             if (!Regex.IsMatch(cleanSources, percentPattern, RegexOptions.IgnoreCase))
             {
                 return false;
@@ -129,15 +129,16 @@ public static partial class EvidenceValidator
                 continue;
             }
 
-            var number = m.Groups[1].Value.Replace(',', '.');
+            var numPattern = BuildDecimalRegexPattern(m.Groups[1].Value);
             var unit = m.Groups[2].Value;
-            var unitPattern = @"\b" + Regex.Escape(number) + @"\s*" + Regex.Escape(unit) + @"\b";
+            var unitPattern = @"\b" + numPattern + @"\s*" + Regex.Escape(unit) + @"\b";
             if (Regex.IsMatch(cleanSources, unitPattern, RegexOptions.IgnoreCase))
             {
                 continue;
             }
 
-            var numberPattern = @"\b" + Regex.Escape(number) + @"\b";
+            var number = m.Groups[1].Value.Replace(',', '.');
+            var numberPattern = @"\b" + numPattern + @"\b";
             var unitPrefix = unit[..Math.Min(3, unit.Length)];
             var unitWordPattern = @"\b" + Regex.Escape(unitPrefix) + @"\w*";
             if (!Regex.IsMatch(cleanSources, numberPattern) || !Regex.IsMatch(cleanSources, unitWordPattern, RegexOptions.IgnoreCase))
@@ -226,13 +227,24 @@ public static partial class EvidenceValidator
         return true;
     }
 
+    private static string BuildDecimalRegexPattern(string decimalStr)
+    {
+        var clean = decimalStr.Replace(',', '.');
+        if (clean.Contains('.'))
+        {
+            var withComma = clean.Replace('.', ',');
+            return @"(?:" + Regex.Escape(clean) + "|" + Regex.Escape(withComma) + ")";
+        }
+        return Regex.Escape(clean);
+    }
+
     private static bool IsToleranceGrounded(string num, string unit, string tol, string sources)
     {
-        var numClean = num.Replace(',', '.');
-        var tolClean = tol.Replace(',', '.');
+        var numPattern = BuildDecimalRegexPattern(num);
+        var tolPattern = BuildDecimalRegexPattern(tol);
         var unitEsc = Regex.Escape(unit);
 
-        var pattern = @"\b" + Regex.Escape(numClean) + @"\s*" + unitEsc + @"\s*±\s*" + Regex.Escape(tolClean) + @"\s*%";
+        var pattern = @"\b" + numPattern + @"\s*" + unitEsc + @"\s*±\s*" + tolPattern + @"\s*%";
         return Regex.IsMatch(sources, pattern, RegexOptions.IgnoreCase);
     }
 

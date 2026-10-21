@@ -39,7 +39,7 @@ public interface IChatGenerator
 public sealed class RagPipeline : IRagPipeline
 {
     private static readonly Regex BracketRegex = new(@"\[([^\]]+)\]", RegexOptions.Compiled);
-    private static readonly Regex TagRegex = new(@"\b(s\d+)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TagRegex = new(@"\b([sс]\d+)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex IdentifierRegex = new(@"\b[A-Za-z]{2,}[A-Za-z0-9]*-[A-Za-z0-9/]+\b", RegexOptions.Compiled);
 
     private static readonly HashSet<string> ExcludedEntityProtocols = new(StringComparer.OrdinalIgnoreCase)
@@ -474,7 +474,8 @@ public sealed class RagPipeline : IRagPipeline
             var tagMatches = TagRegex.Matches(inner);
             foreach (Match tm in tagMatches)
             {
-                var tag = tm.Groups[1].Value.ToUpperInvariant();
+                var rawTag = tm.Groups[1].Value;
+                var tag = "S" + rawTag[1..];
                 if (sourceMap.TryGetValue(tag, out var sourceResult))
                 {
                     if (seenTags.Add(tag))
