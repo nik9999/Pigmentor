@@ -10,17 +10,21 @@ namespace Pigmentor.Ingestion.Normalization.Rules;
 /// </summary>
 public static partial class DehyphenationRule
 {
-    // Pattern 1: lowercase word split across line break (e.g. "конфи-\nгурация")
-    [GeneratedRegex(@"(\p{Ll}+)-\r?\n(\p{Ll}+)")]
+    // Pattern 1: lowercase word split across line break or space (e.g. "конфи-\nгурация", "обслуживаю- щего", "незави- симых")
+    [GeneratedRegex(@"(\p{Ll}+)-(?:\r?\n|\s+)(\p{Ll}+)")]
     private static partial Regex LowercaseHyphenSplitRegex();
 
-    // Pattern 2: TitleCase word followed by uppercase acronym/model across line break (e.g. "Modbus-\nTCP")
+    // Pattern 2: TitleCase word followed by uppercase acronym/model across line break (e.g. "Modbus-\nTCP" -> "Modbus TCP")
     [GeneratedRegex(@"(\p{Lu}\p{Ll}+)-\r?\n(\p{Lu}[\p{Lu}\p{Nd}]+)")]
     private static partial Regex TitleHyphenSplitRegex();
 
-    // Pattern 3: Technical token hyphen spacing (e.g. "RS- 485" -> "RS-485", "AI- 8UI" -> "AI-8UI")
-    [GeneratedRegex(@"\b([A-Za-z]{2,8})-\s+([0-9]+[A-Za-z0-9/]*)\b")]
+    // Pattern 3: Technical token hyphen spacing (e.g. "RS- 485" -> "RS-485", "AI- 8UI/D" -> "AI-8UI/D")
+    [GeneratedRegex(@"\b([A-Za-z]{2,8})-(?:\r?\n|\s+)([0-9]+[A-Za-z0-9/]*)\b")]
     private static partial Regex TechnicalIdentifierSplitRegex();
+
+    // Pattern 4: All-caps acronym hyphen split (e.g. "MOD- BUS RTU" -> "MODBUS RTU")
+    [GeneratedRegex(@"\b(\p{Lu}{2,8})-(?:\r?\n|\s+)(\p{Lu}{2,8})\b")]
+    private static partial Regex AcronymHyphenSplitRegex();
 
     public static ExtractedBlock Normalize(ExtractedBlock block, NormalizationDiagnostics diagnostics)
     {
@@ -86,7 +90,23 @@ public static partial class DehyphenationRule
             return m.Groups[1].Value + " " + m.Groups[2].Value;
         });
 
-        // 3. Repair technical identifier splits: "RS- 485" -> "RS-485", "AI- 8UI" -> "AI-8UI"
+        // 3. Repair all-caps acronym splits: "MOD- BUS RTU" -> "MODBUS RTU"
+        result = AcronymHyphenSplitRegex().Replace(result, m =>
+        {
+            var left = m.Groups[1].Value;
+            var right = m.Groups[2].Value;
+            if (IsSameScript(left, right))
+            {
+                if (diagnostics != null)
+                {
+                    diagnostics.DehyphenationRepairs++;
+                }
+                return left + right;
+            }
+            return m.Value;
+        });
+
+        // 4. Repair technical identifier splits: "RS- 485" -> "RS-485", "AI- 8UI/D" -> "AI-8UI/D"
         result = TechnicalIdentifierSplitRegex().Replace(result, m =>
         {
             if (diagnostics != null)

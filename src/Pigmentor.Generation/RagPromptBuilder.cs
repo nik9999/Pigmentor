@@ -40,4 +40,33 @@ internal static class RagPromptBuilder
 
         return sb.ToString();
     }
+
+    public static string BuildRetryPrompt(string question, RagContext context, string? previousAnswer)
+    {
+        var sb = new StringBuilder();
+
+        sb.AppendLine("ИНСТРУКЦИИ:");
+        sb.AppendLine("В предыдущем ответе отсутствовали обязательные ссылки [S1], [S2] на источники из предоставленного контекста, либо указанные факты, числа или модели не были подтверждены процитированными источниками.");
+        sb.AppendLine("Ответь на вопрос заново строго на русском языке, используя исключительно предоставленный ниже контекст.");
+        sb.AppendLine("ОБЯЗАТЕЛЬНО подтверждай каждый упомянутый факт, число, цену, модель или параметр точной ссылкой формата [S#] (например [S1], [S2]) строго на тот источник, в котором это значение непосредственно содержится.");
+        sb.AppendLine("Не придумывай источники и не искажай факты.");
+        sb.AppendLine();
+
+        sb.AppendLine("КОНТЕКСТ:");
+        if (context.Sources.Count > 0 && !string.IsNullOrWhiteSpace(context.FormattedContext))
+        {
+            sb.AppendLine(context.FormattedContext);
+        }
+        else
+        {
+            sb.AppendLine(NoRelevantSourcesPlaceholder);
+        }
+        sb.AppendLine("КОНЕЦ КОНТЕКСТА");
+        sb.AppendLine();
+
+        sb.AppendLine("ВОПРОС:");
+        sb.Append(question);
+
+        return sb.ToString();
+    }
 }

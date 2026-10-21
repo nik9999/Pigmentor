@@ -181,6 +181,175 @@ public sealed class DogfoodingCorrectiveHardeningTests
         Assert.Equal(normalProse, unchangedProse);
     }
 
+    [Theory]
+    [InlineData("MOD- BUS RTU", "MODBUS RTU")]
+    [InlineData("RS- 485", "RS-485")]
+    [InlineData("AI- 8UI/D", "AI-8UI/D")]
+    [InlineData("обслуживаю-\nщего", "обслуживающего")]
+    [InlineData("обслуживаю- щего", "обслуживающего")]
+    [InlineData("незави-\r\nсимых", "независимых")]
+    [InlineData("незави- симых", "независимых")]
+    public void TechnicalTokenNormalization_DehyphenatesCorrectly(string input, string expected)
+    {
+        var repaired = DehyphenationRule.RepairDehyphenation(input);
+        Assert.Equal(expected, repaired);
+    }
+
+    [Theory]
+    [InlineData("RS-485")]
+    [InlineData("AI-8UI/D")]
+    [InlineData("-20…+20")]
+    [InlineData("0…20")]
+    [InlineData("4-20 mA")]
+    [InlineData("-100…+300 °C")]
+    [InlineData("PX-400")]
+    [InlineData("клиент-сервер")]
+    public void TechnicalTokenNormalization_PreservesValidTechnicalTokens(string token)
+    {
+        var text = $"Прибор {token} эксплуатируется в штатном режиме.";
+        var repaired = DehyphenationRule.RepairDehyphenation(text);
+        Assert.Contains(token, repaired, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Какие товары из каталога поддерживают RS-485?")]
+    [InlineData("Какой товар в каталоге имеет максимальную стоимость?")]
+    [InlineData("Выведи по каталогу цены на оборудование")]
+    [InlineData("Какой товар имеет наибольший гарантийный срок?")]
+    [InlineData("Сколько единиц оборудования есть на складе?")]
+    public void QueryScopeResolver_ResolvesProductCatalogScope_ForExplicitCatalogQueries(string query)
+    {
+        var filter = QueryScopeResolver.ResolveScope(query);
+        Assert.NotNull(filter);
+
+        var catalogMeta = new DocumentMetadata("cat1", Silo: "product-catalog", "", "", "", "Sheet", 2026, "", DateOnly.MinValue, "Catalog");
+        var docsMeta = new DocumentMetadata("doc1", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "Doc");
+
+        Assert.True(filter.Matches(catalogMeta));
+        Assert.False(filter.Matches(docsMeta));
+    }
+
+    [Theory]
+    [InlineData("Что поддерживает Modbus RTU?")]
+    [InlineData("Для чего предназначены модули MDS AI-8UI?")]
+    [InlineData("Какая рабочая температура эксплуатации прибора?")]
+    public void QueryScopeResolver_ReturnsNull_ForGenericQueries(string query)
+    {
+        var filter = QueryScopeResolver.ResolveScope(query);
+        Assert.Null(filter);
+    }
+
+    [Fact]
+    public void EvidenceValidator_ValidatesModelIdentifierAndUnitValues()
+    {
+        var meta = new DocumentMetadata("doc1", "", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "Manual");
+        var chunk = new DocumentChunk("doc1#1", "doc1", 0, "Контроллер TM-200 питается от напряжения 24 В и работает при температуре до 55 °C. Гарантия 36 месяцев. Скидка 7 %.", 0, 100, meta);
+        var citation = new Citation(1, "doc1", "doc1#1", "Manual", chunk.Text, meta);
+
+        // Grounded answer: TM-200, 24 В, 55 °C, 36 месяцев, 7 %
+        var validAnswer = "Контроллер TM-200 [S1] требует питание 24 В [S1], предел 55 °C [S1], гарантия 36 месяцев [S1], скидка 7 % [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(validAnswer, [citation]));
+
+        // Ungrounded model: PX-400 not in chunk
+        var invalidModelAnswer = "Контроллер PX-400 [S1] требует питание 24 В [S1].";
+        Assert.False(EvidenceValidator.ValidateEvidence(invalidModelAnswer, [citation]));
+
+        // Ungrounded unit value: 70 °C instead of 55 °C
+        var invalidUnitAnswer = "Контроллер TM-200 [S1] работает при температуре до 70 °C [S1].";
+        Assert.False(EvidenceValidator.ValidateEvidence(invalidUnitAnswer, [citation]));
+
+        // Ungrounded percentage: 10 % instead of 7 %
+        var invalidPercentAnswer = "Контроллер TM-200 [S1] имеет скидку 10 % [S1].";
+        Assert.False(EvidenceValidator.ValidateEvidence(invalidPercentAnswer, [citation]));
+    }
+
+    [Fact]
+    public void EvidenceValidator_DocxTableAttribution_RequiresExactMaintenanceTableEvidence()
+    {
+        var meta = new DocumentMetadata("docx1", Silo: "technical-docs", "", "", "", "Regulation", 2026, "", DateOnly.MinValue, "PX-400");
+        var table1Chunk = new DocumentChunk("docx1#t1", "docx1", 0, "Таблица 1 Проверка питания: напряжение питания 24 В ±10 % постоянного тока.", 0, 100, meta);
+        var sec3Chunk = new DocumentChunk("docx1#s3", "docx1", 1, "Раздел 3 Аварийные ситуации: допустимый диапазон 20…28 В.", 0, 100, meta);
+
+        var table1Citation = new Citation(1, "docx1", "docx1#t1", "PX-400", table1Chunk.Text, meta);
+        var sec3Citation = new Citation(2, "docx1", "docx1#s3", "PX-400", sec3Chunk.Text, meta);
+
+        // Claiming 24 В citing Table 1 succeeds
+        var answerTable1 = "Номинальное напряжение питания составляет 24 В [S1].";
+        Assert.True(EvidenceValidator.ValidateEvidence(answerTable1, [table1Citation]));
+
+        // Claiming 24 В citing only Section 3 fails because Section 3 contains only 20…28 В
+        Assert.False(EvidenceValidator.ValidateEvidence(answerTable1, [sec3Citation]));
+    }
+
+    [Fact]
+    public async Task BoundedRetry_RetriesAtMostOnce_AndFailsSafelyIfStillUnsatisfied()
+    {
+        var meta = new DocumentMetadata("doc1", "", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "Doc");
+        var chunk = new DocumentChunk("doc1#1", "doc1", 0, "Параметры MDS AI-8UI: 8 каналов.", 0, 50, meta);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+
+        // Always returns answers without citations
+        var fakeChat = new CountingStaticChatClient("Устройство MDS AI-8UI имеет 8 каналов.");
+        var pipeline = new RagPipeline(retriever, fakeChat);
+
+        var response = await pipeline.AskAsync("Сколько каналов?");
+
+        // 1 initial attempt + exactly 1 retry = 2 total LLM calls
+        Assert.Equal(2, fakeChat.CallCount);
+        Assert.False(response.Diagnostics.RequiredCitationsSatisfied);
+        Assert.Equal("Не удалось подтвердить факты в ответе обязательными ссылками на источники контекста.", response.Answer);
+    }
+
+    [Fact]
+    public async Task InsufficientContext_DoesNotTriggerRetry_OrCitationFailure()
+    {
+        var meta = new DocumentMetadata("doc1", "", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "Doc");
+        var chunk = new DocumentChunk("doc1#1", "doc1", 0, "Параметры MDS AI-8UI: 8 каналов.", 0, 50, meta);
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 1.0)]);
+
+        var fakeChat = new CountingStaticChatClient("В предоставленном контексте отсутствует информация о пароле Wi-Fi.");
+        var pipeline = new RagPipeline(retriever, fakeChat);
+
+        var response = await pipeline.AskAsync("Какой пароль от Wi-Fi сети?");
+
+        // Only 1 call because insufficient context answer is valid without citations
+        Assert.Equal(1, fakeChat.CallCount);
+        Assert.True(response.Diagnostics.RequiredCitationsSatisfied);
+        Assert.Contains("отсутствует информация", response.Answer, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class CountingStaticChatClient : IChatClient
+    {
+        private readonly string _response;
+        public int CallCount { get; private set; }
+
+        public CountingStaticChatClient(string response)
+        {
+            _response = response;
+        }
+
+        public ChatClientMetadata Metadata { get; } = new("counting-fake");
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _response)));
+        }
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            yield return new ChatResponseUpdate(ChatRole.Assistant, _response);
+            await Task.CompletedTask;
+        }
+
+        public void Dispose() { }
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+    }
+
     private sealed class FakeRetriever : IRetriever
     {
         private readonly IReadOnlyList<RetrievalResult> _results;

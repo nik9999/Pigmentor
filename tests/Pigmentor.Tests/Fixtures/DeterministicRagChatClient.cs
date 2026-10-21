@@ -102,14 +102,16 @@ public sealed class DeterministicRagChatClient : IChatClient
         // 2. Multi-document query (case 17)
         if (q.Contains("40001") && q.Contains("modbus") && q.Contains("rs-485"))
         {
-            var cite2 = context.Contains("[S2]", StringComparison.Ordinal) ? " [S2]" : "";
-            return $"Опрос температуры из регистра 40001 выполняется по протоколу Modbus RTU со скоростью 115200 по интерфейсу RS-485 [S1]{cite2}.";
+            var s1 = FindSourceTag(context, "40001", "S1");
+            var s2 = FindSourceTag(context, "115200", "S2");
+            return $"Опрос температуры из регистра 40001 выполняется по протоколу Modbus RTU со скоростью 115200 по интерфейсу RS-485 [{s1}] [{s2}].";
         }
 
         // 3. Numeric Precision 40001 (case 18)
         if (q.Contains("цену деления") || (q.Contains("диапазон") && q.Contains("измерения")) || (q.Contains("40001") && q.Contains("диапазон")))
         {
-            return "Для температуры используется регистр 40001, цена деления составляет 0.1 °C, диапазон измерения -40..+85 °C [S1].";
+            var s = FindSourceTag(context, "0.1 °C", "S1");
+            return $"Для температуры используется регистр 40001, цена деления составляет 0.1 °C, диапазон измерения -40..+85 °C [{s}].";
         }
 
         // 4. Register 40057 AlarmThreshold (case 7)
@@ -211,6 +213,26 @@ public sealed class DeterministicRagChatClient : IChatClient
 
         // General fallback: if context has source lines, summarize first sentence
         return "Согласно предоставленной технической документации, система обеспечивает штатную работу [S1].";
+    }
+
+    private static string FindSourceTag(string context, string needle, string fallback = "S1")
+    {
+        var lines = context.Split('\n');
+        var currentTag = fallback;
+        foreach (var line in lines)
+        {
+            var match = Regex.Match(line, @"^\[(S\d+)\]", RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                currentTag = match.Groups[1].Value.ToUpperInvariant();
+            }
+
+            if (line.Contains(needle, StringComparison.OrdinalIgnoreCase))
+            {
+                return currentTag;
+            }
+        }
+        return fallback;
     }
 
     public object? GetService(Type serviceType, object? serviceKey = null) => null;

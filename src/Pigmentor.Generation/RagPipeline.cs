@@ -38,7 +38,14 @@ public interface IChatGenerator
 /// </summary>
 public sealed class RagPipeline : IRagPipeline
 {
-    private static readonly Regex CitationRegex = new(@"\[(s\d+)\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex BracketRegex = new(@"\[([^\]]+)\]", RegexOptions.Compiled);
+    private static readonly Regex TagRegex = new(@"\b(s\d+)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex IdentifierRegex = new(@"\b[A-Za-z]{2,}[A-Za-z0-9]*-[A-Za-z0-9/]+\b", RegexOptions.Compiled);
+
+    private static readonly HashSet<string> ExcludedEntityProtocols = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "RS-485", "RS-232", "MODBUS-RTU", "MODBUS-TCP", "MODBUS"
+    };
 
     private readonly IRetriever _retriever;
     private readonly IChatGenerator _chat;
@@ -145,7 +152,35 @@ public sealed class RagPipeline : IRagPipeline
         genSw.Stop();
         prep.Stopwatch.Stop();
 
-        return FinalizeResponse(rawAnswer, prep, genSw.Elapsed);
+        var firstResponse = FinalizeResponse(rawAnswer, prep, genSw.Elapsed);
+
+        // Bounded retry if citations were required but violated (§5)
+        if (prep.RagContext.Sources.Count > 0 &&
+            !firstResponse.Diagnostics.HasInternalMarkerLeakage &&
+            !string.IsNullOrWhiteSpace(rawAnswer) &&
+            !SignalsInsufficientContext(firstResponse.Answer) &&
+            !firstResponse.Diagnostics.RequiredCitationsSatisfied)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var retryPrompt = RagPromptBuilder.BuildRetryPrompt(request.Question, prep.RagContext, rawAnswer);
+            var retrySw = Stopwatch.StartNew();
+            var retryAnswer = await _chat.GenerateAsync(retryPrompt, cancellationToken).ConfigureAwait(false);
+            retrySw.Stop();
+
+            var retryResponse = FinalizeResponse(retryAnswer, prep, genSw.Elapsed + retrySw.Elapsed);
+            if (retryResponse.Diagnostics.RequiredCitationsSatisfied)
+            {
+                return retryResponse;
+            }
+
+            return new RagResponse(
+                "Не удалось подтвердить факты в ответе обязательными ссылками на источники контекста.",
+                retryResponse.Citations,
+                prep.RagContext.Sources,
+                retryResponse.Diagnostics with { RequiredCitationsSatisfied = false });
+        }
+
+        return firstResponse;
     }
 
     /// <inheritdoc />
@@ -210,16 +245,36 @@ public sealed class RagPipeline : IRagPipeline
         var stopwatch = Stopwatch.StartNew();
         cancellationToken.ThrowIfCancellationRequested();
 
-        // 1. Candidate retrieval
+        // 1. Candidate retrieval (with explicit query scope resolution if no filter was passed)
         var retrievalSw = Stopwatch.StartNew();
-        var retrievalRequest = new RetrievalRequest(request.Question, topK, request.MetadataFilter);
+        var effectiveFilter = request.MetadataFilter ?? QueryScopeResolver.ResolveScope(request.Question);
+        var retrievalRequest = new RetrievalRequest(request.Question, topK, effectiveFilter);
         var candidatePool = await _retriever.RetrieveAsync(retrievalRequest, cancellationToken).ConfigureAwait(false);
+
+        // Multi-source entity retrieval (§3): if the query mentions specific model identifiers, retrieve targeted candidates
+        var identifiers = ExtractEntityIdentifiers(request.Question);
+        if (identifiers.Count > 0)
+        {
+            var entityCandidatesList = new List<RetrievalResult>();
+            foreach (var identifier in identifiers)
+            {
+                var entityReq = new RetrievalRequest(identifier, topK, effectiveFilter);
+                var entityRes = await _retriever.RetrieveAsync(entityReq, cancellationToken).ConfigureAwait(false);
+                entityCandidatesList.AddRange(entityRes);
+            }
+
+            if (entityCandidatesList.Count > 0)
+            {
+                candidatePool = MergeEntityCandidates(candidatePool, entityCandidatesList, identifiers);
+            }
+        }
+
         retrievalSw.Stop();
         cancellationToken.ThrowIfCancellationRequested();
 
         // 2. Defensive post-filtering (guarantees adherence even if retrieval backend had loose semantics)
-        IReadOnlyList<RetrievalResult> filteredCandidates = request.MetadataFilter is not null
-            ? candidatePool.Where(s => request.MetadataFilter.Matches(s.Chunk.Metadata)).ToList()
+        IReadOnlyList<RetrievalResult> filteredCandidates = effectiveFilter is not null
+            ? candidatePool.Where(s => effectiveFilter.Matches(s.Chunk.Metadata)).ToList()
             : candidatePool;
 
         // 3. Reranker receives candidates that satisfied mandatory filtering
@@ -312,7 +367,11 @@ public sealed class RagPipeline : IRagPipeline
             || lower.Contains("отсутствуют", StringComparison.Ordinal)
             || lower.Contains("не найден", StringComparison.Ordinal)
             || lower.Contains("не указан", StringComparison.Ordinal)
+            || lower.Contains("не указана", StringComparison.Ordinal)
+            || lower.Contains("не указаны", StringComparison.Ordinal)
             || lower.Contains("нет информации", StringComparison.Ordinal)
+            || lower.Contains("нет сведений", StringComparison.Ordinal)
+            || lower.Contains("не содержится", StringComparison.Ordinal)
             || lower.Contains("cannot answer", StringComparison.Ordinal)
             || lower.Contains("insufficient", StringComparison.Ordinal);
     }
@@ -365,13 +424,15 @@ public sealed class RagPipeline : IRagPipeline
         }
 
         bool requiredCitationsSatisfied;
-        if (prep.RagContext.Sources.Count == 0 || SignalsInsufficientContext(answer))
+        if (prep.RagContext.Sources.Count == 0 || string.IsNullOrWhiteSpace(answer) || SignalsInsufficientContext(answer))
         {
             requiredCitationsSatisfied = true;
         }
         else
         {
-            requiredCitationsSatisfied = validCount > 0 && invalidCount == 0;
+            var hasValidCitations = validCount > 0 && invalidCount == 0;
+            var isGrounded = hasValidCitations && EvidenceValidator.ValidateEvidence(answer, citations);
+            requiredCitationsSatisfied = isGrounded;
         }
 
         var diagnostics = new RagDiagnostics(
@@ -401,30 +462,96 @@ public sealed class RagPipeline : IRagPipeline
             return ([], 0, 0);
         }
 
-        var matches = CitationRegex.Matches(answer);
+        var bracketMatches = BracketRegex.Matches(answer);
         var seenTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var citations = new List<Citation>();
         var invalidCount = 0;
 
-        foreach (Match match in matches)
+        foreach (Match bm in bracketMatches)
         {
-            var tag = match.Groups[1].Value.ToUpperInvariant();
-
-            if (sourceMap.TryGetValue(tag, out var sourceResult))
+            var inner = bm.Groups[1].Value;
+            var tagMatches = TagRegex.Matches(inner);
+            foreach (Match tm in tagMatches)
             {
-                if (seenTags.Add(tag))
+                var tag = tm.Groups[1].Value.ToUpperInvariant();
+                if (sourceMap.TryGetValue(tag, out var sourceResult))
                 {
-                    var sourceIndex = int.TryParse(tag[1..], out var idx) ? idx : citations.Count + 1;
-                    citations.Add(Citation.FromRetrievalResult(sourceIndex, sourceResult, tag));
+                    if (seenTags.Add(tag))
+                    {
+                        var sourceIndex = int.TryParse(tag[1..], out var idx) ? idx : citations.Count + 1;
+                        citations.Add(Citation.FromRetrievalResult(sourceIndex, sourceResult, tag));
+                    }
                 }
-            }
-            else if (seenTags.Add(tag))
-            {
-                invalidCount++;
+                else if (seenTags.Add(tag))
+                {
+                    invalidCount++;
+                }
             }
         }
 
         return (citations, citations.Count, invalidCount);
+    }
+
+    private static List<string> ExtractEntityIdentifiers(string text)
+    {
+        var list = new List<string>();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return list;
+        }
+
+        var matches = IdentifierRegex.Matches(text);
+        foreach (Match m in matches)
+        {
+            if (!ExcludedEntityProtocols.Contains(m.Value) && !list.Contains(m.Value, StringComparer.OrdinalIgnoreCase))
+            {
+                list.Add(m.Value);
+            }
+        }
+
+        return list;
+    }
+
+    private static List<RetrievalResult> MergeEntityCandidates(
+        IReadOnlyList<RetrievalResult> primary,
+        IReadOnlyList<RetrievalResult> secondary,
+        List<string> entityKeywords)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var entityMatches = new List<RetrievalResult>();
+        var others = new List<RetrievalResult>();
+
+        void Consider(RetrievalResult r)
+        {
+            if (seen.Add(r.Chunk.ChunkId))
+            {
+                var text = r.Chunk.Text;
+                var matchesEntity = entityKeywords.Count > 0 &&
+                                    entityKeywords.Any(k => text.Contains(k, StringComparison.OrdinalIgnoreCase));
+                if (matchesEntity)
+                {
+                    entityMatches.Add(r);
+                }
+                else
+                {
+                    others.Add(r);
+                }
+            }
+        }
+
+        foreach (var r in secondary)
+        {
+            Consider(r);
+        }
+        foreach (var r in primary)
+        {
+            Consider(r);
+        }
+
+        var combined = new List<RetrievalResult>();
+        combined.AddRange(entityMatches);
+        combined.AddRange(others);
+        return combined;
     }
 
     private sealed record PreparedExecution(
