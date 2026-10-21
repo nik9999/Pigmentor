@@ -228,37 +228,92 @@ public sealed class CliRouter
     {
         if (subArgs.Length == 0)
         {
-            _console.WriteError("Error: Question is required.");
+            _console.WriteError("Error: Question or --bulk <file> is required.");
             _console.WriteLine("Usage: pigmentor ask <question> [--stream] [--diagnostics]");
+            _console.WriteLine("       pigmentor ask --bulk <file> [--diagnostics] [--output <file>] [--force]");
             return 2;
         }
 
         var stream = false;
         var diagnostics = false;
+        var force = false;
+        string? bulkPath = null;
+        string? outputPath = null;
         var questionParts = new List<string>();
 
-        foreach (var arg in subArgs)
+        for (var i = 0; i < subArgs.Length; i++)
         {
-            if (arg.StartsWith('-'))
+            var arg = subArgs[i];
+            if (arg.Equals("--stream", StringComparison.OrdinalIgnoreCase))
             {
-                if (arg.Equals("--stream", StringComparison.OrdinalIgnoreCase))
+                stream = true;
+            }
+            else if (arg.Equals("--diagnostics", StringComparison.OrdinalIgnoreCase))
+            {
+                diagnostics = true;
+            }
+            else if (arg.Equals("--force", StringComparison.OrdinalIgnoreCase))
+            {
+                force = true;
+            }
+            else if (arg.Equals("--bulk", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= subArgs.Length || subArgs[i + 1].StartsWith('-'))
                 {
-                    stream = true;
-                }
-                else if (arg.Equals("--diagnostics", StringComparison.OrdinalIgnoreCase))
-                {
-                    diagnostics = true;
-                }
-                else
-                {
-                    _console.WriteError($"Error: Unknown option '{arg}'.");
+                    _console.WriteError("Error: Option '--bulk' requires a file path.");
                     return 2;
                 }
+                bulkPath = subArgs[++i];
+            }
+            else if (arg.Equals("--output", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= subArgs.Length || subArgs[i + 1].StartsWith('-'))
+                {
+                    _console.WriteError("Error: Option '--output' requires a file path.");
+                    return 2;
+                }
+                outputPath = subArgs[++i];
+            }
+            else if (arg.StartsWith('-'))
+            {
+                _console.WriteError($"Error: Unknown option '{arg}'.");
+                return 2;
             }
             else
             {
                 questionParts.Add(arg);
             }
+        }
+
+        var askHandler = new AskCommandHandler(_runtimeFactory, _console);
+
+        if (bulkPath != null)
+        {
+            if (stream)
+            {
+                _console.WriteError("Error: Option '--stream' cannot be used with '--bulk'.");
+                return 2;
+            }
+
+            if (questionParts.Count > 0)
+            {
+                _console.WriteError("Error: Questions cannot be provided as arguments when using '--bulk'.");
+                return 2;
+            }
+
+            return await askHandler.ExecuteBulkAsync(bulkPath, diagnostics, outputPath, force, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (outputPath != null)
+        {
+            _console.WriteError("Error: Option '--output' can only be used with '--bulk'.");
+            return 2;
+        }
+
+        if (force)
+        {
+            _console.WriteError("Error: Option '--force' can only be used with '--bulk'.");
+            return 2;
         }
 
         var question = string.Join(" ", questionParts).Trim();
@@ -269,7 +324,6 @@ public sealed class CliRouter
             return 2;
         }
 
-        var askHandler = new AskCommandHandler(_runtimeFactory, _console);
         return await askHandler.ExecuteAsync(question, stream, diagnostics, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
@@ -291,6 +345,9 @@ public sealed class CliRouter
         _console.WriteLine("  ask <question> [options]         Ask a grounded question against ingested docs");
         _console.WriteLine("      --stream                     Stream answer tokens in real-time");
         _console.WriteLine("      --diagnostics                Display retrieval and generation diagnostics");
+        _console.WriteLine("      --bulk <file>                Run questions in batch from a plain-text file");
+        _console.WriteLine("      --output <file>              Save bulk ask results to a file");
+        _console.WriteLine("      --force                      Overwrite output file if it already exists");
         _console.WriteLine("  chat                             Start interactive RAG query session");
         _console.WriteLine("  status [options]                 Show system readiness and provider setup");
         _console.WriteLine("      --check                      Perform connectivity and health checks");

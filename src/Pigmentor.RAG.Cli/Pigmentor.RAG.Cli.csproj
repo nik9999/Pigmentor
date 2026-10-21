@@ -31,6 +31,13 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <Visible>false</Visible>
     </None>
+    <None Include="$(MSBuildThisFileDirectory)..\..\dogfood\**"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\dogfood')">
+      <Link>dogfood\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </None>
   </ItemGroup>
 
   <Target Name="CheckBgeM3ModelAssets" BeforeTargets="BeforeBuild">
