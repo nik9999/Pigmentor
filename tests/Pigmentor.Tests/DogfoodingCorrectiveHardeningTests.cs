@@ -967,6 +967,45 @@ public sealed class DogfoodingCorrectiveHardeningTests
         Assert.Null(reason);
     }
 
+    [Fact]
+    public void CalculationSubtotal_WrongOperandCorrectResult_FailsValidation()
+    {
+        var meta = new DocumentMetadata("doc-sub-op1", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            """;
+        var citation = new Citation(1, "doc-sub-op1", "doc-sub-op1#1", "Catalog", snippet, meta);
+        var question = "Заказать 5 TM-200";
+        var answer = "12345 × 5 = 98000 руб. [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("В расчёте использована цена 12345, но для модели 'TM-200' в таблице указана цена 19600", reason);
+    }
+
+    [Fact]
+    public void CalculationSubtotal_ReversedCorrectOperands_PassesValidation()
+    {
+        var meta = new DocumentMetadata("doc-sub-op2", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            """;
+        var citation = new Citation(1, "doc-sub-op2", "doc-sub-op2#1", "Catalog", snippet, meta);
+        var question = "Заказать 5 TM-200";
+        var answer = "5 × 19600 = 98000 руб. [S1]";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
     private sealed class CountingStaticChatClient : IChatClient
     {
         private readonly string _response;

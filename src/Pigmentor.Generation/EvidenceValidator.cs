@@ -35,7 +35,7 @@ public static partial class EvidenceValidator
     private static partial Regex PriceHeaderRegex();
 
     [GeneratedRegex(
-        @"(?:(?:стоимост\w*|цена)\s+(?:заказа\s+)?(?:до\s+(?:применения\s+)?скидк\w*|без\s+(?:учета\s+|учёта\s+)?скидк\w*)|(?:до\s+(?:применения\s+)?скидк\w*|без\s+(?:учета\s+|учёта\s+)?скидк\w*)|базов\w*\s+(?:стоимост\w*|цена))\s*(?:[:—–\-]|составляет|\bравна\b|\bбудет\b)?\s*(?<val>\d[\d\s]{1,}\d|\d+)(?:[\.,]\d{1,2})?(?!\s*(?:руб\w*\.?|\$|€|₽)?\s*(?:×|\*|x|х))\s*(?:руб\w*\.?|\$|€|₽)?",
+        @"(?:(?:стоимост\w*|цена)\s+(?:заказа\s+)?(?:до\s+(?:применения\s+)?скидк\w*|без\s+(?:учета\s+|учёта\s+)?скидк\w*)|(?:до\s+(?:применения\s+)?скидк\w*|без\s+(?:учета\s+|учёта\s+)?скидк\w*)|базов\w*\s+(?:стоимост\w*|цена))\s*(?:[:—–\-]|составляет|\bравна\b|\bбудет\b)?\s*(?<val>\d[\d\s]{1,}\d|\d+)(?:[\.,]\d{1,2})?\b(?!\s*(?:руб\w*\.?|\$|€|₽)?\s*(?:×|\*|x|х))\s*(?:руб\w*\.?|\$|€|₽)?",
         RegexOptions.IgnoreCase)]
     private static partial Regex ClaimedSubtotalPhraseRegex();
 
@@ -1408,15 +1408,16 @@ public static partial class EvidenceValidator
 
             var expectedSubtotal = resolvedUnitPrice.Value * qty.Value;
 
-            var (hasClaim, claimedSubtotal, _) = TryExtractClaimedSubtotal(answer, qty.Value, expectedSubtotal);
-            if (!hasClaim)
-            {
-                continue;
-            }
+            var (isValidClaim, claimReason) = VerifyClaimedSubtotal(
+                answer,
+                modelId,
+                qty.Value,
+                resolvedUnitPrice.Value,
+                expectedSubtotal);
 
-            if (claimedSubtotal != expectedSubtotal)
+            if (!isValidClaim)
             {
-                return (false, $"Заявленная стоимость до скидки {claimedSubtotal:0.##} не соответствует расчёту {resolvedUnitPrice.Value:0.##} × {qty.Value} = {expectedSubtotal:0.##}");
+                return (false, claimReason);
             }
         }
 
@@ -1542,9 +1543,11 @@ public static partial class EvidenceValidator
         return false;
     }
 
-    private static (bool HasClaim, decimal ClaimedAmount, string RawClaim) TryExtractClaimedSubtotal(
+    private static (bool IsValid, string? Reason) VerifyClaimedSubtotal(
         string answer,
+        string modelId,
         int expectedQty,
+        decimal expectedUnitPrice,
         decimal expectedSubtotal)
     {
         // 1. Check arithmetic multiplication where one operand is expectedQty
@@ -1556,23 +1559,39 @@ public static partial class EvidenceValidator
             {
                 if (op1 == expectedQty || op2 == expectedQty)
                 {
-                    return (true, res, m.Value);
+                    var priceOperand = (op1 == expectedQty) ? op2 : op1;
+                    if (priceOperand != expectedUnitPrice)
+                    {
+                        return (false, $"В расчёте использована цена {priceOperand:0.##}, но для модели '{modelId}' в таблице указана цена {expectedUnitPrice:0.##}");
+                    }
+
+                    if (res != expectedSubtotal)
+                    {
+                        return (false, $"Заявленная стоимость до скидки {res:0.##} не соответствует расчёту {expectedUnitPrice:0.##} × {expectedQty} = {expectedSubtotal:0.##}");
+                    }
+
+                    return (true, null);
                 }
             }
         }
 
-        // 2. Check explicit subtotal phrase
+        // 2. Check explicit subtotal phrase: "Стоимость до скидки: 98000 руб."
         var phraseMatch = ClaimedSubtotalPhraseRegex().Match(answer);
         if (phraseMatch.Success)
         {
             var rawVal = phraseMatch.Groups["val"].Value;
             if (TryParsePriceDecimal(rawVal, out var phraseAmount))
             {
-                return (true, phraseAmount, phraseMatch.Value);
+                if (phraseAmount != expectedSubtotal)
+                {
+                    return (false, $"Заявленная стоимость до скидки {phraseAmount:0.##} не соответствует расчёту {expectedUnitPrice:0.##} × {expectedQty} = {expectedSubtotal:0.##}");
+                }
+
+                return (true, null);
             }
         }
 
-        return (false, 0m, string.Empty);
+        return (true, null);
     }
 
     internal sealed record TableRowData(
