@@ -14,6 +14,7 @@ public sealed class TestConsoleIO : IConsoleIO
 
     public string Output => _output.ToString();
     public string Error => _error.ToString();
+    public string AllOutput => _output.ToString() + Environment.NewLine + _error.ToString();
 
     public void EnqueueInput(string input) => _inputs.Enqueue(input);
     public void EnqueueSecretInput(string secret) => _secretInputs.Enqueue(secret);

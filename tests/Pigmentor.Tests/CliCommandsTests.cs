@@ -50,7 +50,7 @@ public sealed class CliCommandsTests : IDisposable
         // 1. First init
         var exitCode1 = await handler1.ExecuteAsync();
         Assert.Equal(0, exitCode1);
-        Assert.Contains("Pigmentor initialized.", console1.Output, StringComparison.Ordinal);
+        Assert.Contains("workspace initialized", console1.Output, StringComparison.Ordinal);
         Assert.True(File.Exists(_paths.ConfigFilePath));
 
         // Modify config to prove it's not overwritten
@@ -65,7 +65,7 @@ public sealed class CliCommandsTests : IDisposable
         Assert.Contains("already exists", console2.Output, StringComparison.Ordinal);
 
         var config = await _configManager.LoadAsync();
-        Assert.Equal("CustomModel-v1", config.Chat.Model);
+        Assert.Equal("CustomModel-v1", config.Chat?.Model);
     }
 
     [Fact]
@@ -109,7 +109,7 @@ public sealed class CliCommandsTests : IDisposable
     public async Task ConfigCommand_SetAndShow_UpdatesAndDisplaysSettings()
     {
         var console = new TestConsoleIO();
-        var handler = new ConfigCommandHandler(_configManager, console);
+        var handler = new ConfigCommandHandler(_paths, _configManager, console);
 
         var setCode = await handler.SetAsync("chat.provider", "Ollama");
         Assert.Equal(0, setCode);
@@ -118,7 +118,7 @@ public sealed class CliCommandsTests : IDisposable
         Assert.Equal(0, setDims);
 
         var showConsole = new TestConsoleIO();
-        var showHandler = new ConfigCommandHandler(_configManager, showConsole);
+        var showHandler = new ConfigCommandHandler(_paths, _configManager, showConsole);
         var showCode = await showHandler.ShowAsync();
 
         Assert.Equal(0, showCode);
@@ -139,7 +139,7 @@ public sealed class CliCommandsTests : IDisposable
         Assert.Contains("Pigmentor Operational Status", output, StringComparison.Ordinal);
         Assert.Contains("Chat:", output, StringComparison.Ordinal);
         Assert.Contains("Embeddings:", output, StringComparison.Ordinal);
-        Assert.Contains("Storage:", output, StringComparison.Ordinal);
+        Assert.Contains("Workspace:", output, StringComparison.Ordinal);
     }
 
     [Fact]

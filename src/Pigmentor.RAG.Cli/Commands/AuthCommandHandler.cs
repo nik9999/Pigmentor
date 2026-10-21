@@ -60,7 +60,7 @@ public sealed class AuthCommandHandler
         _console.WriteLine("GigaChat");
         _console.WriteLine($"  Credentials: {(resolution.IsConfigured ? "configured" : "not configured")}");
         _console.WriteLine($"  Source:      {resolution.SourceDescription}");
-        _console.WriteLine($"  Scope:       {config.GigaChat.Scope}");
+        _console.WriteLine($"  Scope:       {config.GigaChat?.Scope ?? "GIGACHAT_API_PERS"}");
 
         return 0;
     }

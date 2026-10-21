@@ -8,17 +8,17 @@ namespace Pigmentor.App.Configuration;
 /// </summary>
 public sealed class PigmentorConfig
 {
+    [JsonPropertyName("rootPath")]
+    public string? RootPath { get; set; }
+
     [JsonPropertyName("chat")]
-    public ChatConfig Chat { get; set; } = new();
+    public ChatConfig? Chat { get; set; } = new();
 
     [JsonPropertyName("embeddings")]
-    public EmbeddingsConfig Embeddings { get; set; } = new();
+    public EmbeddingsConfig? Embeddings { get; set; } = new();
 
     [JsonPropertyName("gigachat")]
-    public GigaChatConfig GigaChat { get; set; } = new();
-
-    [JsonPropertyName("storage")]
-    public StorageConfig Storage { get; set; } = new();
+    public GigaChatConfig? GigaChat { get; set; } = new();
 }
 
 public sealed class ChatConfig
@@ -45,7 +45,12 @@ public sealed class EmbeddingsConfig
     public string Endpoint { get; set; } = "http://localhost:11434";
 
     [JsonPropertyName("modelPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ModelPath { get; set; }
+
+    [JsonPropertyName("tokenizerPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TokenizerPath { get; set; }
 
     [JsonPropertyName("dimensions")]
     public int Dimensions { get; set; } = 768;
@@ -59,10 +64,3 @@ public sealed class GigaChatConfig
     [JsonPropertyName("verifySsl")]
     public bool VerifySsl { get; set; } = true;
 }
-
-public sealed class StorageConfig
-{
-    [JsonPropertyName("databasePath")]
-    public string? DatabasePath { get; set; }
-}
-

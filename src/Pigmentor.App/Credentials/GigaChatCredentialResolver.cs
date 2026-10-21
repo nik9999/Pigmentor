@@ -36,6 +36,8 @@ public sealed class GigaChatCredentialResolver : IGigaChatCredentialProvider
 
     public async ValueTask<CredentialResolutionResult> ResolveCredentialAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         // 1. Explicit runtime credential
         if (!string.IsNullOrWhiteSpace(_explicitKey))
         {
@@ -58,13 +60,16 @@ public sealed class GigaChatCredentialResolver : IGigaChatCredentialProvider
                 return new CredentialResolutionResult(storedKey.Trim(), CredentialSource.SecretStore);
             }
         }
-        catch
+        catch (OperationCanceledException)
         {
-            // Fail safe on read: if secret store fails, proceed to None
+            throw;
+        }
+        catch (PlatformNotSupportedException)
+        {
+            // Headless / unsupported platform falls through to None
         }
 
         // 4. Not configured
         return new CredentialResolutionResult(null, CredentialSource.None);
     }
 }
-

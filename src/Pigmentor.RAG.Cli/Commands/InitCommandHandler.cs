@@ -17,30 +17,39 @@ public sealed class InitCommandHandler
         _console = console ?? throw new ArgumentNullException(nameof(console));
     }
 
-    public async Task<int> ExecuteAsync(CancellationToken cancellationToken = default)
+    public async Task<int> ExecuteAsync(string? explicitRootPath = null, CancellationToken cancellationToken = default)
     {
-        var created = await _configManager.InitializeAsync(cancellationToken).ConfigureAwait(false);
+        var created = await _configManager.InitializeAsync(explicitRootPath, cancellationToken).ConfigureAwait(false);
+        var config = await _configManager.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var effectiveRoot = _paths.ResolveEffectiveRootPath(config.RootPath);
+        var dbPath = _paths.GetDatabasePath(effectiveRoot);
 
         if (created)
         {
-            _console.WriteLine("Pigmentor initialized.");
+            _console.WriteLine("Pigmentor workspace initialized.");
         }
         else
         {
-            _console.WriteLine("Pigmentor configuration already exists (unchanged).");
+            _console.WriteLine("Pigmentor workspace already exists (verified).");
         }
 
         _console.WriteLine();
+        _console.WriteLine($"Root path: {_paths.ResolveEffectiveRootPath(config.RootPath)}");
+        _console.WriteLine($"Database:  {dbPath}");
         _console.WriteLine($"Config:    {_paths.ConfigFilePath}");
-        _console.WriteLine($"Data:      {_paths.DataDirectory}");
-        _console.WriteLine($"Database:  {_paths.DefaultDatabasePath}");
+        _console.WriteLine();
+        _console.WriteLine("Document silos:");
+        foreach (var silo in PigmentorSilos.All)
+        {
+            _console.WriteLine($"  - {silo}/");
+        }
+
         _console.WriteLine();
         _console.WriteLine("Next steps:");
         _console.WriteLine("  pigmentor auth gigachat");
-        _console.WriteLine("  pigmentor ingest <path>");
+        _console.WriteLine("  pigmentor sync");
         _console.WriteLine("  pigmentor ask \"<question>\"");
 
         return 0;
     }
 }
-

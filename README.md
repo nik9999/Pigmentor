@@ -1,137 +1,155 @@
 # Pigmentor
 
-Pigmentor is a .NET 10 RAG platform built from the reusable SmartDocs ideas,
-with a project-specific `Pigmentor.*` namespace.
+Pigmentor is an enterprise-grade .NET 10 Retrieval-Augmented Generation (RAG) platform with embedded vector storage, structural document extraction, deterministic evaluation, and a reference command-line interface.
 
-## First slice
+## Supported Operating Systems
 
-- `Pigmentor.Core` contains domain primitives, ports, abstractions and configuration contracts.
-- `Pigmentor.Ingestion` contains document loading, chunking and embedding pipelines.
-- `Pigmentor.Retrieval` contains dense, sparse, hybrid, graph and vectorless retrieval.
-- `Pigmentor.Generation` contains the retrieve-augment-generate pipeline.
-- `Pigmentor.GigaChat` contains the Sber GigaChat REST adapter and Microsoft.Extensions.AI implementations.
-- `Pigmentor.Hosting` contains the composition root, `PigmentorBuilder`, and top-level DI registrations (`UseOllama`, `UseGigaChat`, `UseConfiguredProviders`).
-- `Pigmentor.VectorStore.SqliteVec` provides embedded, portable vector storage powered by SQLite and native sqlite-vec (`vec0`), supporting transactional relational chunk storage and storage-side metadata pre-filtering.
-- `Pigmentor.Tests` contains unit and integration tests.
+Pigmentor applications target **Windows** and **Linux** only:
 
-The default provider is local Ollama (`nomic-embed-text` and `llama3.2`).
-The sqlite-vec native extension (`vec0`) is automatically resolved and loaded across platforms (Windows, Linux, macOS) by `SqliteVecExtensionLoader`, with support for an explicit path override if needed.
+| Capability | Windows | Linux Desktop | Linux Headless |
+| :--- | :---: | :---: | :---: |
+| **CLI Runtime** | YES | YES | YES |
+| **OS Secret Store** | YES (DPAPI) | YES (Secret Service / `secret-tool`) | — |
+| **Environment Credential** | YES | YES | YES (`PIGMENTOR_GIGACHAT_AUTH_KEY`) |
+| **SQLite + sqlite-vec** | YES | YES | YES |
+| **Future Avalonia Desktop** | YES | YES | — |
 
-Chat and embeddings are configured independently:
+> [!NOTE]
+> macOS is not supported.
+
+## Architectural Layers
+
+- `Pigmentor.Core`: Domain primitives, ports, abstractions, chunking structures, and configuration contracts.
+- `Pigmentor.Ingestion`: Document loading (PDF, DOCX, XLSX, TXT, images), structural normalization, quality gating, and embedding pipelines.
+- `Pigmentor.Retrieval`: Dense vector retrieval, sparse lexical retrieval, hybrid fusion (RRF), structural retrieval, and reranking.
+- `Pigmentor.Generation`: Retrieve-augment-generate pipeline, prompt construction, grounding enforcement, and citation mapping.
+- `Pigmentor.GigaChat`: Sber GigaChat REST adapter and Microsoft.Extensions.AI implementations.
+- `Pigmentor.Hosting`: Composition root, `PigmentorBuilder`, and DI registrations (`UseOllama`, `UseGigaChat`, `UseConfiguredProviders`).
+- `Pigmentor.VectorStore.SqliteVec`: Embedded, portable vector storage powered by SQLite and native sqlite-vec (`vec0`), supporting relational chunk storage and storage-side metadata pre-filtering.
+- `Pigmentor.Evaluation`: Deterministic synthetic test suites, regression benchmarks, retrieval metrics (Hit@K, MRR@K, NDCG@K), and generation metrics (grounding fidelity, citation precision/recall).
+- `Pigmentor.App`: Application workspace management, configuration serialization, credential resolution, and runtime composition.
+- `Pigmentor.RAG.Cli`: Reference executable command-line interface (`pigmentor`).
+
+## Provider Combinations
+
+Pigmentor supports 4 core provider combinations for chat and embeddings:
+
+1. **Ollama Chat + Ollama Embeddings** (Default fully local setup)
+2. **GigaChat + Ollama Embeddings**
+3. **Ollama Chat + Local ONNX Embeddings** (e.g. BGE-M3 ONNX runtime)
+4. **GigaChat + Local ONNX Embeddings**
+
+### Configuration (`config.json`)
+
+Configuration is stored in `<appData>/config.json` without secrets:
 
 ```json
 {
-  "Pigmentor": {
-    "Llm": {
-      "Provider": "Ollama",
-      "Endpoint": "http://localhost:11434",
-      "ChatModel": "llama3.2"
-    },
-    "Embedding": {
-      "Provider": "Ollama",
-      "Endpoint": "http://localhost:11434",
-      "Model": "nomic-embed-text"
-    }
+  "rootPath": "D:\\PigmentorData",
+  "chat": {
+    "provider": "Ollama",
+    "model": "llama3.2",
+    "endpoint": "http://localhost:11434"
+  },
+  "embeddings": {
+    "provider": "Ollama",
+    "model": "nomic-embed-text",
+    "endpoint": "http://localhost:11434",
+    "dimensions": 768
+  },
+  "gigachat": {
+    "scope": "GIGACHAT_API_PERS",
+    "verifySsl": true
   }
 }
 ```
 
-```csharp
-// Programmatic provider configuration:
-services.AddPigmentor()
-    .UseOllama(new Uri("http://localhost:11434"), chatModel: "llama3.2", embeddingModel: "nomic-embed-text");
+For local ONNX embeddings:
 
-// Or with Sber GigaChat:
-services.AddPigmentor()
-    .UseGigaChat(authorizationKey: "...", chatModel: "GigaChat-2-Lite");
-
-// Or dynamically wired from configuration (Pigmentor:Llm and Pigmentor:Embedding sections):
-services.AddPigmentor(configuration)
-    .UseConfiguredProviders();
-```
-
-Use `Embedding:Provider = Onnx` for a local BGE-M3 backend. Set both
-`Embedding:ModelPath` and `Embedding:TokenizerPath`; BGE-M3 requires the
-converted ONNX graph and its compatible tokenizer bundle.
-
-## RAG Pipeline Execution
-
-The generation pipeline (`IRagPipeline`) orchestrates retrieval with metadata filtering, reranking, token budgeting, prompt injection defense, generation, and citation mapping. By default, Pigmentor v1 uses Russian instructions and preserves technical terms (`Modbus`, `RS-485`, registers, commands) verbatim:
-
-```csharp
-// Fluent RAG configuration
-services.AddPigmentor(configuration)
-    .UseOllama(new Uri("http://localhost:11434"), chatModel: "llama3.2")
-    .ConfigureRagPipeline(settings =>
-    {
-        settings.DefaultTopK = 5;
-        settings.Budget = new ContextBudget(MaxTotalTokens: 4096, ReservedOutputTokens: 1024);
-    });
-
-// Complete response
-var response = await pipeline.AskAsync(new RagRequest("Какие регистры Modbus поддерживаются?", topK: 5));
-Console.WriteLine(response.Answer);
-
-// Streaming response
-await foreach (var evt in pipeline.AskStreamingAsync(new RagRequest("Покажи конфигурацию RS-485")))
+```json
 {
-    if (evt is RagTextDelta delta) Console.Write(delta.Text);
-    else if (evt is RagCompleted completed) Console.WriteLine($"\nCitations: {completed.Response.Citations.Count}");
+  "embeddings": {
+    "provider": "Onnx",
+    "modelPath": "/models/bge-m3.onnx",
+    "tokenizerPath": "/models/tokenizer.json",
+    "dimensions": 1024
+  }
 }
 ```
 
-## Run
+## Workspace & Document Silos
 
-```powershell
-dotnet build Pigmentor.slnx
-dotnet test Pigmentor.slnx
+Pigmentor operates against a single workspace specified by `rootPath`.
+The vector database is always derived strictly as:
+
+```text
+<rootPath>/pigmentor.db
 ```
 
-## Pigmentor CLI (`pigmentor`)
+The workspace organizes enterprise documents into **6 fixed standard silos**:
 
-`Pigmentor.RAG.Cli` provides a reference command-line interface for configuration, credential management, ingestion, and interactive RAG query execution against technical documentation.
+1. `hr-policies`
+2. `technical-docs`
+3. `financial-reports`
+4. `legal-contracts`
+5. `product-catalog`
+6. `release-notes-tickets`
+
+Executing `pigmentor init` idempotently provisions `rootPath` and all 6 silo directories.
+
+## Security & Credential Management
 
 > [!WARNING]
-> **Security Warning:**
-> Never place the GigaChat Authorization Key in `config.json` or other plain text configuration files.
-> - For **interactive local usage**, use `pigmentor auth gigachat` to securely store the key in OS-protected credential storage (DPAPI on Windows).
-> - For **CI/CD, container, or headless environments**, set the `PIGMENTOR_GIGACHAT_AUTH_KEY` environment variable.
+> **Security Mandate:**
+> Never place the GigaChat Authorization Key in `config.json` or plain text files.
+> - **Interactive Desktop/CLI**: Use `pigmentor auth gigachat` to securely store credentials in OS-protected credential storage (Windows DPAPI or Linux FreeDesktop Secret Service via `secret-tool`).
+> - **Headless / CI / Containers**: Set the `PIGMENTOR_GIGACHAT_AUTH_KEY` environment variable. Plaintext fallback is strictly rejected (fail closed).
+
+## Pigmentor CLI (`pigmentor`)
 
 ### Quick Start Workflow
 
 ```powershell
-# 1. Initialize user directories and configuration
-dotnet run --project src/Pigmentor.RAG.Cli -- init
+# 1. Initialize user workspace and document silos
+pigmentor init
 
 # 2. Store GigaChat credentials securely (no terminal echo)
-dotnet run --project src/Pigmentor.RAG.Cli -- auth gigachat
+pigmentor auth gigachat
 
 # 3. Configure providers
-dotnet run --project src/Pigmentor.RAG.Cli -- config set chat.provider gigachat
-dotnet run --project src/Pigmentor.RAG.Cli -- config set embeddings.provider ollama
+pigmentor config set chat.provider GigaChat
+pigmentor config set chat.model GigaChat-2-Pro
 
-# 4. Ingest a document file or entire directory
-dotnet run --project src/Pigmentor.RAG.Cli -- ingest ./docs
+# 4. Synchronize all documents across workspace silos
+pigmentor sync
 
-# 5. Ask a question with sources and citations
-dotnet run --project src/Pigmentor.RAG.Cli -- ask "Какая скорость интерфейса RS-485?" --stream --diagnostics
+# 5. Ask a question with sources and diagnostics
+pigmentor ask "Какая скорость передачи данных установлена для RS-485?" --stream --diagnostics
 
-# 6. Start an interactive conversational RAG session
-dotnet run --project src/Pigmentor.RAG.Cli -- chat
+# 6. Start an interactive RAG query session
+pigmentor chat
 ```
 
 ### CLI Command Reference
 
-- **`pigmentor init`**: Idempotently creates user application data and configuration directories.
+- **`pigmentor init`**: Idempotently creates the workspace directory structure (`rootPath`, `pigmentor.db`, and the 6 silo folders).
+- **`pigmentor sync`**: Synchronizes all supported documents across the 6 workspace silos into SQLite + sqlite-vec. Features resilient recursive traversal, deterministic sorting, skipping of unsupported files, warning on unknown root folders, and structured summary reporting.
 - **`pigmentor auth gigachat`**: Prompts securely (without console echo) for the GigaChat Authorization Key and encrypts it via the platform's secure secret store.
-- **`pigmentor auth status`**: Displays credential readiness and resolution source (`OS protected secret store`, `environment variable`, or `not configured`) without revealing secrets.
+- **`pigmentor auth status`**: Displays credential readiness and resolution provenance (`OS protected secret store`, `environment variable`, or `not configured`) without exposing secrets.
 - **`pigmentor auth logout [gigachat]`**: Deletes credentials from the secure OS secret store.
-- **`pigmentor config show`**: Displays all active non-secret configuration settings.
-- **`pigmentor config set <setting> <value>`**: Updates a setting in `config.json`. Any attempt to set sensitive keywords (`key`, `secret`, `auth`, `token`, `password`, `credential`) is strictly rejected.
-- **`pigmentor ingest <path>`**: Ingests a single file or recursively scans a directory. Supports PDF, DOCX, XLSX, TXT, BMP, PNG, JPG. Automatically detects unchanged files and skips redundant reprocessing.
-- **`pigmentor ask "<question>" [--stream] [--diagnostics]`**: Queries the RAG pipeline.
+- **`pigmentor config show`**: Displays active non-secret configuration settings, workspace root path, and derived database path.
+- **`pigmentor config set <setting> <value>`**: Updates a setting in `config.json`. Setting sensitive keywords (`key`, `secret`, `auth`, `token`, `password`, `credential`) or deprecated `databasePath` is strictly rejected.
+- **`pigmentor ingest <path>`**: Ingests an ad-hoc single file or directory. Supports PDF, DOCX, XLSX, TXT, BMP, PNG, JPG. Automatically detects unchanged files and skips redundant reprocessing.
+- **`pigmentor ask <question> [--stream] [--diagnostics]`**: Queries the RAG pipeline. Multi-word unquoted questions are automatically joined.
   - `--stream`: Streams text tokens in real time, followed by final citations and provenance.
   - `--diagnostics`: Displays retrieval candidate count, sources used, citation counts, prompt tokens, and execution latency.
-- **`pigmentor chat`**: Launches an interactive chat loop with `/exit`, `/clear` (new conversation context), and `/help`.
-- **`pigmentor status [--check]`**: Displays operational readiness of the chat model, embedding service, and vector storage. With `--check`, executes an active connectivity and authentication probe.
+- **`pigmentor chat`**: Launches an interactive query loop. Questions are answered independently against the index. Features per-turn Ctrl+C handling: interrupting a generation turn cancels the active query and returns to the `> ` prompt without exiting the chat session.
+- **`pigmentor status [--check]`**: Displays operational readiness of the chat model, embedding service, and vector storage. With `--check`, executes an active connectivity and authentication probe (exits with code 1 if health check fails).
 
+## Build & Test
+
+```powershell
+dotnet build Pigmentor.slnx
+dotnet format --verify-no-changes Pigmentor.slnx
+dotnet test Pigmentor.slnx
+```

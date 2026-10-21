@@ -3,10 +3,9 @@ using System.Runtime.InteropServices;
 namespace Pigmentor.App.Paths;
 
 /// <summary>
-/// Cross-platform implementation of <see cref="IPigmentorAppPaths"/> adhering to OS conventions.
-/// Windows: %APPDATA%/Pigmentor/ and %LOCALAPPDATA%/Pigmentor/
-/// Linux: $XDG_CONFIG_HOME/pigmentor/ and $XDG_DATA_HOME/pigmentor/
-/// macOS: ~/Library/Application Support/Pigmentor/
+/// Cross-platform implementation of <see cref="IPigmentorAppPaths"/> targeting Windows and Linux.
+/// Windows: Config in %APPDATA%/Pigmentor, default root in %LOCALAPPDATA%/Pigmentor
+/// Linux: Config in $XDG_CONFIG_HOME/pigmentor, default root in $XDG_DATA_HOME/pigmentor
 /// </summary>
 public sealed class PigmentorAppPaths : IPigmentorAppPaths
 {
@@ -17,18 +16,17 @@ public sealed class PigmentorAppPaths : IPigmentorAppPaths
     private const string SecretsFileName = "secrets.dat";
 
     public string ConfigDirectory { get; }
-    public string DataDirectory { get; }
+    public string DefaultRootPath { get; }
 
     public string ConfigFilePath => Path.Combine(ConfigDirectory, ConfigFileName);
-    public string DefaultDatabasePath => Path.Combine(DataDirectory, DatabaseFileName);
-    public string SecretsFilePath => Path.Combine(DataDirectory, SecretsFileName);
+    public string SecretsFilePath => Path.Combine(DefaultRootPath, SecretsFileName);
 
-    public PigmentorAppPaths(string? configDirectory = null, string? dataDirectory = null)
+    public PigmentorAppPaths(string? configDirectory = null, string? defaultRootPath = null)
     {
-        if (!string.IsNullOrWhiteSpace(configDirectory) && !string.IsNullOrWhiteSpace(dataDirectory))
+        if (!string.IsNullOrWhiteSpace(configDirectory) && !string.IsNullOrWhiteSpace(defaultRootPath))
         {
             ConfigDirectory = Path.GetFullPath(configDirectory);
-            DataDirectory = Path.GetFullPath(dataDirectory);
+            DefaultRootPath = Path.GetFullPath(defaultRootPath);
             return;
         }
 
@@ -38,18 +36,46 @@ public sealed class PigmentorAppPaths : IPigmentorAppPaths
             ? Path.GetFullPath(configDirectory)
             : resolvedConfig;
 
-        DataDirectory = !string.IsNullOrWhiteSpace(dataDirectory)
-            ? Path.GetFullPath(dataDirectory)
+        DefaultRootPath = !string.IsNullOrWhiteSpace(defaultRootPath)
+            ? Path.GetFullPath(defaultRootPath)
             : resolvedData;
     }
 
-    public void EnsureDirectoriesCreated()
+    public string ResolveEffectiveRootPath(string? configuredRootPath)
     {
-        Directory.CreateDirectory(ConfigDirectory);
-        Directory.CreateDirectory(DataDirectory);
+        if (string.IsNullOrWhiteSpace(configuredRootPath))
+        {
+            return DefaultRootPath;
+        }
+
+        return Path.GetFullPath(configuredRootPath.Trim());
     }
 
-    private static (string ConfigDir, string DataDir) ResolvePlatformDirectories()
+    public string GetDatabasePath(string rootPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
+        var normalizedRoot = ResolveEffectiveRootPath(rootPath);
+        return Path.Combine(normalizedRoot, DatabaseFileName);
+    }
+
+    public void EnsureConfigDirectoryCreated()
+    {
+        Directory.CreateDirectory(ConfigDirectory);
+    }
+
+    public void EnsureWorkspaceDirectories(string rootPath)
+    {
+        var normalizedRoot = ResolveEffectiveRootPath(rootPath);
+        Directory.CreateDirectory(normalizedRoot);
+
+        foreach (var silo in PigmentorSilos.All)
+        {
+            var siloDir = Path.Combine(normalizedRoot, silo);
+            Directory.CreateDirectory(siloDir);
+        }
+    }
+
+    private static (string ConfigDir, string DefaultDataDir) ResolvePlatformDirectories()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
@@ -72,14 +98,7 @@ public sealed class PigmentorAppPaths : IPigmentorAppPaths
             return (configDir, dataDir);
         }
 
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-        {
-            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var appSupport = Path.Combine(home, "Library", "Application Support", AppFolderName);
-            return (appSupport, appSupport);
-        }
-
-        // Linux / Unix / FreeBSD fallback per XDG Base Directory specification
+        // Linux / Unix per XDG Base Directory specification
         var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
         var xdgConfig = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
@@ -98,4 +117,3 @@ public sealed class PigmentorAppPaths : IPigmentorAppPaths
         );
     }
 }
-

@@ -5,7 +5,8 @@ namespace Pigmentor.App.Security;
 
 /// <summary>
 /// Factory for instantiating OS-protected credential stores.
-/// Fails closed when no OS-protected credential store is supported.
+/// Windows: DPAPI protected user file storage.
+/// Linux: FreeDesktop Secret Service via secret-tool (GNOME Keyring / compatible).
 /// </summary>
 public static class SecretStoreFactory
 {
@@ -18,8 +19,12 @@ public static class SecretStoreFactory
             return new WindowsDataProtectionSecretStore(paths.SecretsFilePath);
         }
 
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return new LinuxSecretServiceSecretStore();
+        }
+
         return new FailClosedSecretStore(
             "Secure credential store is unavailable on this platform. Use environment variable PIGMENTOR_GIGACHAT_AUTH_KEY or configure a supported credential store.");
     }
 }
-

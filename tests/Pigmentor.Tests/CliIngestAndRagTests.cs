@@ -31,9 +31,9 @@ public sealed class CliIngestAndRagTests : IDisposable
         _paths = new PigmentorAppPaths(_tempDirectory, _tempDirectory);
         _config = new PigmentorConfig
         {
-            Storage = { DatabasePath = _dbPath },
-            Chat = { Provider = "Ollama", Model = "llama3" },
-            Embeddings = { Provider = "Ollama", Model = "nomic-embed-text", Dimensions = 64 }
+            RootPath = _tempDirectory,
+            Chat = new() { Provider = "Ollama", Model = "llama3" },
+            Embeddings = new() { Provider = "Ollama", Model = "nomic-embed-text", Dimensions = 64 }
         };
 
         _secretStore = new InMemorySecretStore();

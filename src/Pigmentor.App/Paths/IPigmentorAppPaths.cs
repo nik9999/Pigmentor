@@ -1,38 +1,50 @@
 namespace Pigmentor.App.Paths;
 
 /// <summary>
-/// Cross-platform application paths abstraction separating configuration and runtime data.
+/// Cross-platform application paths abstraction separating configuration, workspace root, and runtime data.
+/// Supports Windows and Linux.
 /// </summary>
 public interface IPigmentorAppPaths
 {
     /// <summary>
-    /// Directory containing user-level configuration files (e.g. config.json).
+    /// Directory containing user-level configuration files (config.json).
     /// </summary>
     string ConfigDirectory { get; }
 
     /// <summary>
-    /// Directory containing runtime state, vector database, and credentials.
+    /// Default workspace root path if not explicitly configured by the user.
     /// </summary>
-    string DataDirectory { get; }
+    string DefaultRootPath { get; }
 
     /// <summary>
-    /// Absolute path to the configuration file (config.json).
+    /// Absolute path to the user configuration file (config.json).
     /// </summary>
     string ConfigFilePath { get; }
 
     /// <summary>
-    /// Absolute default path to the SQLite vector database.
-    /// </summary>
-    string DefaultDatabasePath { get; }
-
-    /// <summary>
-    /// Absolute path to the encrypted secret store file on platforms using file-backed protected storage.
+    /// Absolute path to the encrypted secret store file on Windows (DPAPI).
     /// </summary>
     string SecretsFilePath { get; }
 
     /// <summary>
-    /// Ensures both the configuration and data directories exist on disk.
+    /// Resolves and normalizes the effective absolute workspace root path.
     /// </summary>
-    void EnsureDirectoriesCreated();
-}
+    string ResolveEffectiveRootPath(string? configuredRootPath);
 
+    /// <summary>
+    /// Derives the absolute path to the SQLite vector database from the workspace root.
+    /// The database is always &lt;rootPath&gt;/pigmentor.db and is never independently configured.
+    /// </summary>
+    string GetDatabasePath(string rootPath);
+
+    /// <summary>
+    /// Ensures the configuration directory exists.
+    /// </summary>
+    void EnsureConfigDirectoryCreated();
+
+    /// <summary>
+    /// Idempotently ensures the workspace root and the six fixed document silos exist on disk.
+    /// Does not delete or overwrite existing files or database.
+    /// </summary>
+    void EnsureWorkspaceDirectories(string rootPath);
+}

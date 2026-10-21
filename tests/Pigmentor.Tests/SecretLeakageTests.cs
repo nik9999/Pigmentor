@@ -102,7 +102,7 @@ public sealed class SecretLeakageTests : IDisposable
     public async Task ConfigShowOutput_NeverPrintsSecret()
     {
         var console = new TestConsoleIO();
-        var handler = new ConfigCommandHandler(_configManager, console);
+        var handler = new ConfigCommandHandler(_paths, _configManager, console);
 
         var exitCode = await handler.ShowAsync();
 
@@ -112,7 +112,7 @@ public sealed class SecretLeakageTests : IDisposable
         Assert.DoesNotContain(SyntheticSecret, output, StringComparison.Ordinal);
         Assert.Contains("Chat:", output, StringComparison.Ordinal);
         Assert.Contains("Embeddings:", output, StringComparison.Ordinal);
-        Assert.Contains("Storage:", output, StringComparison.Ordinal);
+        Assert.Contains("Workspace:", output, StringComparison.Ordinal);
     }
 
     [Fact]

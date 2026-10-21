@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using Pigmentor.App.Configuration;
 using Pigmentor.App.Credentials;
 using Pigmentor.App.Paths;
@@ -30,79 +29,119 @@ public sealed class StatusCommandHandler
 
     public async Task<int> ExecuteAsync(bool check = false, CancellationToken cancellationToken = default)
     {
-        var config = await _configManager.LoadAsync(cancellationToken).ConfigureAwait(false);
+        PigmentorConfig config;
+        try
+        {
+            config = await _configManager.LoadAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _console.WriteError($"Configuration Error: {ex.Message}");
+            return 2;
+        }
+
+        var validationErrors = PigmentorConfigManager.Validate(config);
+        if (validationErrors.Count > 0)
+        {
+            _console.WriteError("Configuration Validation Errors:");
+            foreach (var err in validationErrors)
+            {
+                _console.WriteError($"  - {err}");
+            }
+            return 2;
+        }
+
+        var effectiveRoot = _paths.ResolveEffectiveRootPath(config.RootPath);
+        var dbPath = _paths.GetDatabasePath(effectiveRoot);
         var credentialRes = await _credentialProvider.ResolveCredentialAsync(cancellationToken).ConfigureAwait(false);
 
         _console.WriteLine("Pigmentor Operational Status");
         _console.WriteLine("============================");
         _console.WriteLine();
 
+        _console.WriteLine("Workspace:");
+        _console.WriteLine($"  Root Path:        {effectiveRoot}");
+        _console.WriteLine($"  Database:         {dbPath}");
+        var dbExists = File.Exists(dbPath);
+        _console.WriteLine($"  Database on disk: {(dbExists ? "exists" : "will be created on first sync")}");
+        _console.WriteLine();
+
         _console.WriteLine("Chat:");
-        _console.WriteLine($"  Provider:    {config.Chat.Provider}");
-        _console.WriteLine($"  Model:       {config.Chat.Model}");
-        _console.WriteLine($"  Endpoint:    {config.Chat.Endpoint}");
-        _console.WriteLine($"  Credentials: {(credentialRes.IsConfigured ? $"configured ({credentialRes.SourceDescription})" : "not configured")}");
+        _console.WriteLine($"  Provider:         {config.Chat!.Provider}");
+        _console.WriteLine($"  Model:            {config.Chat.Model}");
+        _console.WriteLine($"  Endpoint:         {config.Chat.Endpoint}");
+        _console.WriteLine($"  Credentials:      {(credentialRes.IsConfigured ? $"configured ({credentialRes.SourceDescription})" : "not configured")}");
         _console.WriteLine();
 
         _console.WriteLine("Embeddings:");
-        _console.WriteLine($"  Provider:    {config.Embeddings.Provider}");
-        _console.WriteLine($"  Model:       {config.Embeddings.Model}");
-        _console.WriteLine($"  Dimensions:  {config.Embeddings.Dimensions}");
-        _console.WriteLine();
-
-        _console.WriteLine("Storage:");
-        _console.WriteLine("  Backend:     SQLite + sqlite-vec");
-        _console.WriteLine($"  Database:    {config.Storage.DatabasePath}");
-        var dbExists = !string.IsNullOrWhiteSpace(config.Storage.DatabasePath) && File.Exists(config.Storage.DatabasePath);
-        _console.WriteLine($"  Database on disk: {(dbExists ? "exists" : "will be created on first ingestion")}");
+        _console.WriteLine($"  Provider:         {config.Embeddings!.Provider}");
+        if (string.Equals(config.Embeddings.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
+        {
+            _console.WriteLine($"  Model Path:       {config.Embeddings.ModelPath}");
+            _console.WriteLine($"  Tokenizer Path:   {config.Embeddings.TokenizerPath ?? "(none)"}");
+        }
+        else
+        {
+            _console.WriteLine($"  Model:            {config.Embeddings.Model}");
+            _console.WriteLine($"  Endpoint:         {config.Embeddings.Endpoint}");
+        }
+        _console.WriteLine($"  Dimensions:       {config.Embeddings.Dimensions}");
 
         if (check)
         {
             _console.WriteLine();
-            _console.WriteLine("Connection Validation (--check):");
-
-            await ValidateConnectionsAsync(config, credentialRes, cancellationToken).ConfigureAwait(false);
+            _console.WriteLine("Connection & Health Validation (--check):");
+            var healthy = await ValidateConnectionsAsync(config, credentialRes, cancellationToken).ConfigureAwait(false);
+            return healthy ? 0 : 1;
         }
 
         return 0;
     }
 
-    private async Task ValidateConnectionsAsync(
+    private async Task<bool> ValidateConnectionsAsync(
         PigmentorConfig config,
         CredentialResolutionResult credentialRes,
         CancellationToken cancellationToken)
     {
+        var allHealthy = true;
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(TimeSpan.FromSeconds(5));
 
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 
-        // 1. Validate Chat
-        if (string.Equals(config.Chat.Provider, "GigaChat", StringComparison.OrdinalIgnoreCase))
+        // 1. Validate Chat Provider
+        if (string.Equals(config.Chat!.Provider, "GigaChat", StringComparison.OrdinalIgnoreCase))
         {
             if (!credentialRes.IsConfigured)
             {
-                _console.WriteLine("  Chat (GigaChat): credentials missing (cannot validate).");
+                _console.WriteLine("  Chat (GigaChat): FAILED (credentials are not configured).");
+                allHealthy = false;
             }
             else
             {
                 try
                 {
                     _console.Write("  Chat (GigaChat auth): ");
-                    // Check auth endpoint with authorization key
                     var authClient = new GigaChatAuthClient(new GigaChatClientOptions
                     {
                         AuthorizationKey = credentialRes.Key,
-                        Scope = config.GigaChat.Scope,
-                        IgnoreSslValidation = !config.GigaChat.VerifySsl
+                        Scope = config.GigaChat?.Scope ?? "GIGACHAT_API_PERS",
+                        IgnoreSslValidation = config.GigaChat != null && !config.GigaChat.VerifySsl
                     }, http);
 
                     _ = await authClient.GetAccessTokenAsync(cts.Token).ConfigureAwait(false);
                     _console.WriteLine("OK (authenticated successfully)");
+
+                    // Also check chat endpoint reachability
+                    _console.Write("  Chat (GigaChat endpoint reachability): ");
+                    var chatBaseUri = new Uri(config.Chat.Endpoint);
+                    var checkResp = await http.GetAsync(chatBaseUri, cts.Token).ConfigureAwait(false);
+                    _console.WriteLine("OK (endpoint reachable)");
                 }
                 catch (Exception ex)
                 {
-                    _console.WriteLine($"Failed ({SecretRedactor.Redact(ex.Message, credentialRes.Key)})");
+                    _console.WriteLine($"FAILED ({SecretRedactor.Redact(ex.Message, credentialRes.Key)})");
+                    allHealthy = false;
                 }
             }
         }
@@ -112,27 +151,60 @@ public sealed class StatusCommandHandler
             {
                 _console.Write("  Chat (Ollama): ");
                 var resp = await http.GetAsync(new Uri(new Uri(config.Chat.Endpoint), "/api/tags"), cts.Token).ConfigureAwait(false);
-                _console.WriteLine(resp.IsSuccessStatusCode ? "OK" : $"Response code {(int)resp.StatusCode}");
+                if (resp.IsSuccessStatusCode)
+                {
+                    _console.WriteLine("OK");
+                }
+                else
+                {
+                    _console.WriteLine($"FAILED (HTTP {(int)resp.StatusCode})");
+                    allHealthy = false;
+                }
             }
             catch (Exception ex)
             {
-                _console.WriteLine($"Failed ({ex.Message})");
+                _console.WriteLine($"FAILED ({ex.Message})");
+                allHealthy = false;
             }
         }
 
-        // 2. Validate Embeddings if Ollama
-        if (string.Equals(config.Embeddings.Provider, "Ollama", StringComparison.OrdinalIgnoreCase))
+        // 2. Validate Embeddings Provider
+        if (string.Equals(config.Embeddings!.Provider, "Ollama", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
                 _console.Write("  Embeddings (Ollama): ");
                 var resp = await http.GetAsync(new Uri(new Uri(config.Embeddings.Endpoint), "/api/tags"), cts.Token).ConfigureAwait(false);
-                _console.WriteLine(resp.IsSuccessStatusCode ? "OK" : $"Response code {(int)resp.StatusCode}");
+                if (resp.IsSuccessStatusCode)
+                {
+                    _console.WriteLine("OK");
+                }
+                else
+                {
+                    _console.WriteLine($"FAILED (HTTP {(int)resp.StatusCode})");
+                    allHealthy = false;
+                }
             }
             catch (Exception ex)
             {
-                _console.WriteLine($"Failed ({ex.Message})");
+                _console.WriteLine($"FAILED ({ex.Message})");
+                allHealthy = false;
             }
         }
+        else if (string.Equals(config.Embeddings.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
+        {
+            _console.Write("  Embeddings (ONNX file validation): ");
+            if (File.Exists(config.Embeddings.ModelPath))
+            {
+                _console.WriteLine("OK (model file exists)");
+            }
+            else
+            {
+                _console.WriteLine($"FAILED (model file '{config.Embeddings.ModelPath}' not found)");
+                allHealthy = false;
+            }
+        }
+
+        return allHealthy;
     }
 }

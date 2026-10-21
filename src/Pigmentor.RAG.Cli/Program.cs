@@ -6,14 +6,27 @@ namespace Pigmentor.RAG.Cli;
 
 public static class Program
 {
+    /// <summary>
+    /// When non-null, interceptor is invoked upon Ctrl+C. If it returns true, the keypress
+    /// is treated as handled (e.g., cancelling an active turn in chat) and does not cancel the global process token.
+    /// </summary>
+    public static Func<bool>? ConsoleCancelInterceptor { get; set; }
+
     public static async Task<int> Main(string[] args)
     {
         using var cts = new CancellationTokenSource();
 
         System.Console.CancelKeyPress += (sender, eventArgs) =>
         {
-            // Do not terminate process immediately; trigger cancellation for clean shutdown
+            // Do not terminate process immediately
             eventArgs.Cancel = true;
+
+            if (ConsoleCancelInterceptor != null && ConsoleCancelInterceptor())
+            {
+                // Intercepted by active turn handler
+                return;
+            }
+
             cts.Cancel();
         };
 
