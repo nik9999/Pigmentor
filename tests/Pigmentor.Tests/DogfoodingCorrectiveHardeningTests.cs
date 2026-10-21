@@ -1150,6 +1150,149 @@ public sealed class DogfoodingCorrectiveHardeningTests
         Assert.Null(reason);
     }
 
+    [Fact]
+    public void StockAvailability_ZeroStock_NegativeAnswer_PassesValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh1", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | LV-8 | 0 | 0 | 0 | 0 |
+            """;
+        var citation = new Citation(1, "doc-wh1", "doc-wh1#1", "Warehouse", snippet, meta);
+        var question = "Есть ли LV-8 на складе?";
+        var answer = "LV-8 нет в наличии [S1].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void StockAvailability_ZeroStock_PositiveAnswer_FailsValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh2", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | LV-8 | 0 | 0 | 0 | 0 |
+            """;
+        var citation = new Citation(1, "doc-wh2", "doc-wh2#1", "Warehouse", snippet, meta);
+        var question = "Есть ли LV-8 на складе?";
+        var answer = "LV-8 есть в наличии [S1].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("отсутствует", reason);
+    }
+
+    [Fact]
+    public void StockAvailability_ZeroStock_UnknownAnswer_RealRegression_FailsValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh3", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | LV-8 | 0 | 0 | 0 | 0 |
+            """;
+        var citation = new Citation(1, "doc-wh3", "doc-wh3#1", "Warehouse", snippet, meta);
+        var question = "Есть ли LV-8 на складе?";
+        var answer = "Нет информации о наличии LV-8 на складе [S1].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("отсутствии информации", reason);
+    }
+
+    [Fact]
+    public void StockAvailability_PositiveStock_PositiveAnswer_PassesValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh4", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | TM-200 | 2 | 1 | 3 | 6 |
+            """;
+        var citation = new Citation(1, "doc-wh4", "doc-wh4#1", "Warehouse", snippet, meta);
+        var question = "Есть ли TM-200 в наличии?";
+        var answer = "TM-200 есть в наличии [S1].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void StockAvailability_PositiveStock_NegativeAnswer_FailsValidation()
+    {
+        var meta = new DocumentMetadata("doc-wh5", Silo: "warehouse", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань | Екатеринбург | Всего |
+            | --- | --- | --- | --- | --- |
+            | TM-200 | 2 | 1 | 3 | 6 |
+            """;
+        var citation = new Citation(1, "doc-wh5", "doc-wh5#1", "Warehouse", snippet, meta);
+        var question = "Есть ли TM-200 на складе?";
+        var answer = "TM-200 нет в наличии [S1].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        Assert.False(isValid);
+        Assert.NotNull(reason);
+        Assert.Contains("имеется в наличии", reason);
+    }
+
+    [Fact]
+    public void StockAvailability_CatalogTable_ResolvesStockColumnNotPriceOrWarranty()
+    {
+        var meta = new DocumentMetadata("doc-cat-stock", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена | Остаток, шт. | Гарантия |
+            | --- | --- | --- | --- |
+            | LV-8 | 9800 | 0 | 12 |
+            """;
+        var citation = new Citation(1, "doc-cat-stock", "doc-cat-stock#1", "Catalog", snippet, meta);
+        var question = "Есть ли LV-8 на складе?";
+
+        // Negative answer passes because stock is 0 (and not 9800 or 12)
+        var passAnswer = "LV-8 нет в наличии [S1].";
+        var (isPassValid, passReason) = EvidenceValidator.ValidateEvidenceWithReason(passAnswer, [citation], question);
+        Assert.True(isPassValid, passReason);
+        Assert.Null(passReason);
+
+        // Positive answer fails because stock is 0
+        var failAnswer = "LV-8 есть в наличии [S1].";
+        var (isFailValid, failReason) = EvidenceValidator.ValidateEvidenceWithReason(failAnswer, [citation], question);
+        Assert.False(isFailValid);
+        Assert.NotNull(failReason);
+    }
+
+    [Fact]
+    public void StockAvailability_UnresolvedTable_FailsOpen()
+    {
+        var meta = new DocumentMetadata("doc-synth-stock", Silo: "catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Параметр | Значение |
+            | --- | --- | --- |
+            | LV-8 | Тип | Оптический |
+            """;
+        var citation = new Citation(1, "doc-synth-stock", "doc-synth-stock#1", "Catalog", snippet, meta);
+        var question = "Есть ли LV-8 на складе?";
+        var answer = "В контексте отсутствует информация о наличии датчика LV-8 на складе [S1].";
+
+        var (isValid, reason) = EvidenceValidator.ValidateEvidenceWithReason(answer, [citation], question);
+
+        // Ambiguity policy: no stock column -> unresolved, does not falsely reject
+        Assert.True(isValid, reason);
+        Assert.Null(reason);
+    }
+
     private sealed class CountingStaticChatClient : IChatClient
     {
         private readonly string _response;

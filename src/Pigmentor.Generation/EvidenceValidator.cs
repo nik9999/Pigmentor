@@ -64,6 +64,36 @@ public static partial class EvidenceValidator
         RegexOptions.IgnoreCase)]
     private static partial Regex ClaimedFinalTotalPhraseRegex();
 
+    [GeneratedRegex(
+        @"(?:\b(?:есть\s+ли|имеется\s+ли|есть|имеется)\b.*?\b(?:на\s+склад\w*|в\s+наличи\w*)\b|\b(?:на\s+склад\w*|в\s+наличи\w*)\b.*?\b(?:есть\s+ли|имеется\s+ли|есть|имеется|ли\b)\b|\bналичи\w*\s+(?:товара\s+|модели\s+|продукции\s+|прибора\s+|датчика\w*\s+)?(?:на\s+склад\w*|[A-Za-zА-Яа-я0-9_-]+)|\b(?:каково|какое|уточните|проверьте)\s+наличи\w*\b|\bдоступ\w*\s+ли\b|\b(?:in\s+stock|available)\b)",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex AvailabilityQuestionRegex();
+
+    [GeneratedRegex(
+        @"^\s*(?:всего|итого|total)\s*(?:,\s*(?:шт\.?|ед\.?|штук\w*|единиц\w*|units?|pcs?|pieces?)|\([^)]*\))?\s*$",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex TotalStockHeaderRegex();
+
+    [GeneratedRegex(
+        @"\b(?:остаток\w*|stock|quantity|qty)\b",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex StockHeaderRegex();
+
+    [GeneratedRegex(
+        @"(?:\b(?:нет\s+(?:точной\s+|достоверной\s+|какой-либо\s+)?информаци\w*|нет\s+данных|нет\s+сведений)\b|\bинформаци\w*(?:\s+\w+){0,4}\s+отсутству\w*|\bотсутству\w*(?:\s+\w+){0,4}\s+информаци\w*|\bданные(?:\s+\w+){0,4}\s+отсутству\w*|\bотсутству\w*(?:\s+\w+){0,4}\s+данные\b|\bсведения(?:\s+\w+){0,4}\s+отсутству\w*|\bотсутству\w*(?:\s+\w+){0,4}\s+сведения\b|\bнеизвестн\w*\b|\bнедостаточно\s+информаци\w*\b|\b(?:no\s+information|unknown|insufficient\s+information|not\s+specified)\b)",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex StockUnknownAnswerRegex();
+
+    [GeneratedRegex(
+        @"(?:\b(?:нет\s+(?:в\s+наличи\w*|на\s+склад\w*)|(?:в\s+наличи\w*|на\s+склад\w*)\s+нет)\b|\b(?:отсутству\w*|не\s+доступ\w*|недоступ\w*)\s+(?:в\s+наличи\w*|на\s+склад\w*|к\s+заказу|для\s+заказа)\b|\b(?:в\s+наличи\w*|на\s+склад\w*)\s+(?:отсутству\w*|не\s+доступ\w*|недоступ\w*)\b|\bтовар\w*\s+отсутству\w*\b|\b(?:отсутству\w*|закончил\w*|не\s+доступ\w*|недоступ\w*)\b|\b(?:out\s+of\s+stock|not\s+in\s+stock|not\s+available)\b)",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex StockNegativeAnswerRegex();
+
+    [GeneratedRegex(
+        @"(?:\b(?:есть|имеется)\s+(?:в\s+наличи\w*|на\s+склад\w*)\b|\b(?:в\s+наличи\w*|на\s+склад\w*)\s+(?:есть|имеется)\b|(?<!не\s+)(?<!не)\bдоступ\w*\s+(?:на\s+склад\w*|для\s+заказа|к\s+заказу)\b|(?<!нет\s+)(?<!не\s+)\bв\s+наличи\w*\b|\b(?:in\s+stock|available)\b)",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex StockPositiveAnswerRegex();
+
     private static readonly HashSet<string> ExcludedIdentifiers = new(StringComparer.OrdinalIgnoreCase)
     {
         "RS-485", "RS-232", "MODBUS-RTU", "MODBUS-TCP", "MODBUS"
@@ -189,6 +219,13 @@ public static partial class EvidenceValidator
         if (!isDiscountValid)
         {
             return (false, discountReason);
+        }
+
+        // 3d. Stock availability verification (grounded stock and availability claim)
+        var (isStockValid, stockReason) = ValidateStockAvailability(answer, tables, question);
+        if (!isStockValid)
+        {
+            return (false, stockReason);
         }
 
         // 4. Structured table extremum fidelity (filter + max/min)
@@ -1850,6 +1887,254 @@ public static partial class EvidenceValidator
         }
 
         return (true, null);
+    }
+
+    private static (bool IsValid, string? Reason) ValidateStockAvailability(
+        string answer,
+        IReadOnlyList<ParsedTable> tables,
+        string? question)
+    {
+        if (string.IsNullOrWhiteSpace(question) || !IsAvailabilityQuestion(question))
+        {
+            return (true, null);
+        }
+
+        var requestedModels = FindRequestedModelIdentifiers(question);
+        if (requestedModels.Count == 0)
+        {
+            return (true, null);
+        }
+
+        foreach (var modelId in requestedModels)
+        {
+            decimal? resolvedStock = null;
+            foreach (var table in tables)
+            {
+                if (TryResolveStockQuantity(table, modelId, out var stock))
+                {
+                    resolvedStock = stock;
+                    break;
+                }
+            }
+
+            if (resolvedStock == null)
+            {
+                continue;
+            }
+
+            var stockQuantity = resolvedStock.Value;
+            var modelContext = ExtractModelContext(answer, modelId);
+            var semantics = ClassifyStockAnswer(modelContext);
+
+            if (semantics == StockAnswerSemantics.Unresolved)
+            {
+                continue;
+            }
+
+            if (stockQuantity <= 0m)
+            {
+                if (semantics == StockAnswerSemantics.Positive)
+                {
+                    return (false, $"Модель '{modelId}' отсутствует на складе (остаток 0), но в ответе утверждается о её наличии");
+                }
+
+                if (semantics == StockAnswerSemantics.Unknown)
+                {
+                    return (false, $"В цитируемых источниках указан остаток модели '{modelId}' (остаток 0, нет в наличии), но в ответе утверждается об отсутствии информации");
+                }
+            }
+            else // stockQuantity > 0m
+            {
+                if (semantics == StockAnswerSemantics.Negative)
+                {
+                    return (false, $"Модель '{modelId}' имеется в наличии на складе (остаток {stockQuantity:0.##}), но в ответе утверждается о её отсутствии");
+                }
+
+                if (semantics == StockAnswerSemantics.Unknown)
+                {
+                    return (false, $"В цитируемых источниках указан остаток модели '{modelId}' (остаток {stockQuantity:0.##}, в наличии), но в ответе утверждается об отсутствии информации");
+                }
+            }
+        }
+
+        return (true, null);
+    }
+
+    private static bool IsAvailabilityQuestion(string question)
+    {
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            return false;
+        }
+
+        if (IsExtremumQuestion(question, out _) || IsCalculationQuestion(question))
+        {
+            return false;
+        }
+
+        return AvailabilityQuestionRegex().IsMatch(question);
+    }
+
+    private static bool IsTotalStockHeader(string header)
+    {
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return false;
+        }
+
+        if (Regex.IsMatch(header, @"\b(?:цен\w*|стоимост\w*|сум\w*|руб\w*|канал\w*|вход\w*|выход\w*|заказ\w*|продаж\w*)\b", RegexOptions.IgnoreCase))
+        {
+            return false;
+        }
+
+        return TotalStockHeaderRegex().IsMatch(header.Trim());
+    }
+
+    private static bool IsStockHeader(string header)
+    {
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return false;
+        }
+
+        if (Regex.IsMatch(header, @"\b(?:цен\w*|стоимост\w*|сум\w*|руб\w*|канал\w*|вход\w*|выход\w*|заказ\w*|продаж\w*)\b", RegexOptions.IgnoreCase))
+        {
+            return false;
+        }
+
+        return StockHeaderRegex().IsMatch(header);
+    }
+
+    internal static int ResolveStockColumn(ParsedTable table)
+    {
+        if (table.Headers == null || table.Headers.Count == 0)
+        {
+            return -1;
+        }
+
+        // 1. Total stock column ("Всего", "Всего, шт.", "Total", "Итого")
+        for (var i = 0; i < table.Headers.Count; i++)
+        {
+            if (IsTotalStockHeader(table.Headers[i]))
+            {
+                return i;
+            }
+        }
+
+        // 2. Specific stock column ("Остаток", "Остаток, шт.", "Stock", "Quantity", "Qty")
+        var stockIndices = new List<int>();
+        for (var i = 0; i < table.Headers.Count; i++)
+        {
+            if (IsStockHeader(table.Headers[i]))
+            {
+                stockIndices.Add(i);
+            }
+        }
+
+        if (stockIndices.Count == 1)
+        {
+            return stockIndices[0];
+        }
+
+        return -1;
+    }
+
+    internal static bool TryResolveStockQuantity(
+        ParsedTable table,
+        string modelId,
+        out decimal quantity)
+    {
+        quantity = 0m;
+        var stockCol = ResolveStockColumn(table);
+        if (stockCol < 0)
+        {
+            return false;
+        }
+
+        foreach (var row in table.Rows)
+        {
+            if (RowMatchesModel(row, modelId))
+            {
+                if (stockCol < row.Cells.Count && TryParseStockDecimal(row.Cells[stockCol], out quantity))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryParseStockDecimal(string text, out decimal stock)
+    {
+        stock = 0m;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var cleaned = Regex.Replace(text.Trim(), @"(?<=\d)\s+(?=\d)", "");
+        var m = Regex.Match(cleaned, @"\b\d+(?:[\.,]\d{1,2})?\b");
+        if (!m.Success)
+        {
+            return false;
+        }
+
+        var numStr = m.Value.Replace(',', '.');
+        if (decimal.TryParse(numStr, NumberStyles.Number, CultureInfo.InvariantCulture, out stock) && stock >= 0m)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static StockAnswerSemantics ClassifyStockAnswer(string answer)
+    {
+        if (StockUnknownAnswerRegex().IsMatch(answer))
+        {
+            return StockAnswerSemantics.Unknown;
+        }
+
+        if (StockNegativeAnswerRegex().IsMatch(answer))
+        {
+            return StockAnswerSemantics.Negative;
+        }
+
+        if (StockPositiveAnswerRegex().IsMatch(answer))
+        {
+            return StockAnswerSemantics.Positive;
+        }
+
+        return StockAnswerSemantics.Unresolved;
+    }
+
+    private static string ExtractModelContext(string answer, string modelId)
+    {
+        var sentences = answer.Split(['.', ';', '!', '?', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries);
+        var matching = new List<string>();
+        foreach (var s in sentences)
+        {
+            if (ContainsModelIdentifier(s, modelId))
+            {
+                matching.Add(s);
+            }
+        }
+
+        if (matching.Count > 0)
+        {
+            return string.Join(". ", matching);
+        }
+
+        return answer;
+    }
+
+    private enum StockAnswerSemantics
+    {
+        Unresolved,
+        Unknown,
+        Negative,
+        Positive
     }
 
     internal sealed record TableRowData(
