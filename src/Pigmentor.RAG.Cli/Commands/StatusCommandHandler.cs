@@ -1,6 +1,7 @@
 using Pigmentor.App.Configuration;
 using Pigmentor.App.Credentials;
 using Pigmentor.App.Paths;
+using Pigmentor.App.Runtime;
 using Pigmentor.App.Security;
 using Pigmentor.GigaChat;
 using Pigmentor.GigaChat.Auth;
@@ -85,6 +86,15 @@ public sealed class StatusCommandHandler
                 : "(none)";
             _console.WriteLine($"  Model Path:       {config.Embeddings.ModelPath} (resolved: {resolvedModel})");
             _console.WriteLine($"  Tokenizer Path:   {config.Embeddings.TokenizerPath ?? "(none)"} (resolved: {resolvedTok})");
+            if (!string.IsNullOrWhiteSpace(config.Embeddings.ModelPath) && resolvedModel != "(none)")
+            {
+                var dir = Path.GetDirectoryName(resolvedModel);
+                var externalData = dir != null ? Path.Combine(dir, "model.onnx_data") : null;
+                if (externalData != null && File.Exists(externalData))
+                {
+                    _console.WriteLine($"  External Data:    model.onnx_data (resolved: {externalData})");
+                }
+            }
         }
         else
         {
@@ -111,9 +121,9 @@ public sealed class StatusCommandHandler
     {
         var allHealthy = true;
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        cts.CancelAfter(TimeSpan.FromSeconds(30));
 
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
 
         // 1. Validate Chat Provider
         if (string.Equals(config.Chat!.Provider, "GigaChat", StringComparison.OrdinalIgnoreCase))
@@ -199,34 +209,131 @@ public sealed class StatusCommandHandler
         }
         else if (string.Equals(config.Embeddings.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
         {
-            _console.Write("  Embeddings (ONNX file validation): ");
-            var modelResolved = !string.IsNullOrWhiteSpace(config.Embeddings.ModelPath)
-                ? _paths.ResolveApplicationPath(config.Embeddings.ModelPath)
-                : null;
-            var tokResolved = !string.IsNullOrWhiteSpace(config.Embeddings.TokenizerPath)
-                ? _paths.ResolveApplicationPath(config.Embeddings.TokenizerPath)
-                : null;
+            _console.Write("  Embeddings (ONNX inference): ");
+            var modelPath = config.Embeddings.ModelPath;
+            var tokenizerPath = config.Embeddings.TokenizerPath;
 
-            var modelExists = modelResolved != null && File.Exists(modelResolved);
-            var tokExists = tokResolved != null && File.Exists(tokResolved);
-
-            if (modelExists && tokExists)
+            if (string.IsNullOrWhiteSpace(modelPath) || string.IsNullOrWhiteSpace(tokenizerPath))
             {
-                _console.WriteLine("OK (model and tokenizer files exist)");
+                _console.WriteLine("FAILED");
+                _console.WriteLine("    ModelPath or TokenizerPath is not configured in settings.");
+                allHealthy = false;
             }
             else
             {
-                var missing = new List<string>();
-                if (!modelExists)
+                var modelResolved = _paths.ResolveApplicationPath(modelPath);
+                var tokResolved = _paths.ResolveApplicationPath(tokenizerPath);
+
+                var modelExists = File.Exists(modelResolved);
+                var tokExists = File.Exists(tokResolved);
+
+                if (!modelExists || !tokExists)
                 {
-                    missing.Add($"model file '{config.Embeddings.ModelPath}' (resolved: '{modelResolved}') not found");
+                    _console.WriteLine("FAILED");
+                    if (!modelExists)
+                    {
+                        _console.WriteLine($"    ONNX model file '{modelPath}' (resolved: '{modelResolved}') was not found. Run scripts/download-bge-m3.ps1 to download production model assets.");
+                    }
+                    if (!tokExists)
+                    {
+                        _console.WriteLine($"    Tokenizer file '{tokenizerPath}' (resolved: '{tokResolved}') was not found. Run scripts/download-bge-m3.ps1 to download production model assets.");
+                    }
+                    allHealthy = false;
                 }
-                if (!tokExists)
+                else
                 {
-                    missing.Add($"tokenizer file '{config.Embeddings.TokenizerPath}' (resolved: '{tokResolved}') not found");
+                    // Check if external model weights are required:
+                    // If model file size is less than 50MB and named model.onnx (e.g. BAAI graph definition ~725KB),
+                    // model.onnx_data must be present next to model.onnx.
+                    var modelDir = Path.GetDirectoryName(modelResolved) ?? string.Empty;
+                    var externalDataPath = Path.Combine(modelDir, "model.onnx_data");
+                    var modelFileInfo = new FileInfo(modelResolved);
+
+                    if (string.Equals(Path.GetFileName(modelResolved), "model.onnx", StringComparison.OrdinalIgnoreCase)
+                        && modelFileInfo.Length < 50 * 1024 * 1024
+                        && !File.Exists(externalDataPath))
+                    {
+                        _console.WriteLine("FAILED");
+                        _console.WriteLine($"    ONNX model graph requires external weights file 'model.onnx_data', which is missing in '{modelDir}'. Run scripts/download-bge-m3.ps1.");
+                        allHealthy = false;
+                    }
+                    else
+                    {
+                        var expectedDim = config.Embeddings.Dimensions > 0 ? config.Embeddings.Dimensions : 1024;
+                        try
+                        {
+                            using var generator = new OnnxEmbeddingGenerator(
+                                modelPath: modelResolved,
+                                tokenizerPath: tokResolved,
+                                dimensions: expectedDim);
+
+                            var generated = await generator.GenerateAsync(["Pigmentor embedding health check"], null, cts.Token).ConfigureAwait(false);
+
+                            if (generated.Count == 0 || generated[0].Vector.IsEmpty)
+                            {
+                                _console.WriteLine("FAILED");
+                                _console.WriteLine("    ONNX inference produced an empty embedding vector.");
+                                allHealthy = false;
+                            }
+                            else
+                            {
+                                var vector = generated[0].Vector.ToArray();
+                                if (vector.Length != expectedDim)
+                                {
+                                    _console.WriteLine("FAILED");
+                                    _console.WriteLine($"    Embedding dimension mismatch: expected {expectedDim}, got {vector.Length}.");
+                                    allHealthy = false;
+                                }
+                                else
+                                {
+                                    var hasNonFinite = false;
+                                    var sumSquares = 0.0;
+                                    foreach (var val in vector)
+                                    {
+                                        if (float.IsNaN(val) || float.IsInfinity(val))
+                                        {
+                                            hasNonFinite = true;
+                                            break;
+                                        }
+                                        sumSquares += val * val;
+                                    }
+
+                                    if (hasNonFinite)
+                                    {
+                                        _console.WriteLine("FAILED");
+                                        _console.WriteLine("    Embedding vector contains non-finite values (NaN or Infinity).");
+                                        allHealthy = false;
+                                    }
+                                    else if (sumSquares <= 1e-12)
+                                    {
+                                        _console.WriteLine("FAILED");
+                                        _console.WriteLine("    Embedding vector is an all-zero vector.");
+                                        allHealthy = false;
+                                    }
+                                    else
+                                    {
+                                        _console.WriteLine($"OK ({vector.Length} dimensions)");
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _console.WriteLine("FAILED");
+                            if (ex.Message.Contains("model.onnx_data", StringComparison.OrdinalIgnoreCase) ||
+                                ex.Message.Contains("external data", StringComparison.OrdinalIgnoreCase))
+                            {
+                                _console.WriteLine($"    ONNX model graph requires external weights file 'model.onnx_data', which is missing in '{modelDir}'. Run scripts/download-bge-m3.ps1.");
+                            }
+                            else
+                            {
+                                var safeMsg = SecretRedactor.Redact(ex.Message, credentialRes.Key);
+                                _console.WriteLine($"    {safeMsg}");
+                            }
+                            allHealthy = false;
+                        }
+                    }
                 }
-                _console.WriteLine($"FAILED ({string.Join(", ", missing)})");
-                allHealthy = false;
             }
         }
 

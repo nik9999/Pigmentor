@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Pigmentor.Ingestion.Chunking;
 using Pigmentor.Ingestion.Fingerprints;
 using Pigmentor.Ingestion.Lifecycle;
 
@@ -76,15 +77,25 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
             Content: normalized.ToFullContent(),
             SourcePath: filePath);
 
-        return await IngestAsync(doc, sourceId, explicitVersion, cancellationToken).ConfigureAwait(false);
+        return await IngestCoreAsync(doc, normalized, sourceId, explicitVersion, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
-    public async Task<IngestionResult> IngestAsync(
+    public Task<IngestionResult> IngestAsync(
         Document document,
         string sourceId = "default",
         long? explicitVersion = null,
         CancellationToken cancellationToken = default)
+    {
+        return IngestCoreAsync(document, null, sourceId, explicitVersion, cancellationToken);
+    }
+
+    private async Task<IngestionResult> IngestCoreAsync(
+        Document document,
+        NormalizedDocument? normalizedDoc,
+        string sourceId,
+        long? explicitVersion,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(document.Metadata);
@@ -219,9 +230,16 @@ public sealed partial class DocumentIngestionService : IDocumentIngestionService
         {
             // 1. Chunk document
             var chunks = new List<DocumentChunk>();
-            await foreach (var chunk in _chunker.ChunkAsync(document, cancellationToken).ConfigureAwait(false))
+            if (normalizedDoc != null && _chunker is StructuralDocumentChunker structuralChunker)
             {
-                chunks.Add(chunk);
+                chunks.AddRange(structuralChunker.Chunk(normalizedDoc));
+            }
+            else
+            {
+                await foreach (var chunk in _chunker.ChunkAsync(document, cancellationToken).ConfigureAwait(false))
+                {
+                    chunks.Add(chunk);
+                }
             }
 
             // 2. Embed chunks in memory before touching vector store

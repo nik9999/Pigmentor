@@ -7,6 +7,19 @@ namespace Pigmentor.RAG.Cli.Console;
 /// </summary>
 public sealed class SystemConsoleIO : IConsoleIO
 {
+    static SystemConsoleIO()
+    {
+        try
+        {
+            System.Console.OutputEncoding = Encoding.UTF8;
+            System.Console.InputEncoding = Encoding.UTF8;
+        }
+        catch
+        {
+            // Best effort when streams are redirected
+        }
+    }
+
     public void Write(string message)
     {
         System.Console.Write(message);

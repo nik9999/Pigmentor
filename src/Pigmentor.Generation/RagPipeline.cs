@@ -273,11 +273,79 @@ public sealed class RagPipeline : IRagPipeline
             RetrievalLatency: retrievalSw.Elapsed);
     }
 
+    private static readonly string[] InternalDelimiters =
+    [
+        "КОНЕЦ КОНТЕКСТА",
+        "КОНЕЦ КОНТЕКСТ",
+        "КОНТЕКСТ:",
+        "ИНСТРУКЦИИ:",
+        "ВОПРОС:"
+    ];
+
+    private static bool ContainsInternalDelimiters(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        foreach (var marker in InternalDelimiters)
+        {
+            if (text.Contains(marker, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool SignalsInsufficientContext(string answer)
+    {
+        if (string.IsNullOrWhiteSpace(answer))
+        {
+            return false;
+        }
+
+        var lower = answer.ToLowerInvariant();
+        return lower.Contains("недостаточно", StringComparison.Ordinal)
+            || lower.Contains("отсутствует", StringComparison.Ordinal)
+            || lower.Contains("отсутствуют", StringComparison.Ordinal)
+            || lower.Contains("не найден", StringComparison.Ordinal)
+            || lower.Contains("не указан", StringComparison.Ordinal)
+            || lower.Contains("нет информации", StringComparison.Ordinal)
+            || lower.Contains("cannot answer", StringComparison.Ordinal)
+            || lower.Contains("insufficient", StringComparison.Ordinal);
+    }
+
     private static RagResponse FinalizeResponse(
         string? rawAnswer,
         PreparedExecution prep,
         TimeSpan generationLatency)
     {
+        if (!string.IsNullOrWhiteSpace(rawAnswer) && ContainsInternalDelimiters(rawAnswer))
+        {
+            var leakDiag = new RagDiagnostics(
+                TotalLatency: prep.Stopwatch.Elapsed,
+                RetrievedCandidateCount: prep.CandidatePool.Count,
+                ContextSourceCount: prep.RagContext.Sources.Count,
+                ContextTokenCount: prep.RagContext.Sources.Count > 0 ? prep.RagContext.TokenCount : null,
+                FilteredCandidateCount: prep.FilteredCandidates.Count,
+                RerankedCandidateCount: prep.RerankedCandidates.Count,
+                PromptTokenCount: prep.PromptTokenCount,
+                ValidCitationCount: 0,
+                InvalidCitationCount: 0,
+                RetrievalLatency: prep.RetrievalLatency,
+                GenerationLatency: generationLatency,
+                RequiredCitationsSatisfied: false,
+                HasInternalMarkerLeakage: true);
+
+            return new RagResponse(
+                "Ответ отклонен: обнаружена утечка внутренних служебных маркеров контекста.",
+                [],
+                prep.RagContext.Sources,
+                leakDiag);
+        }
+
         string answer;
         IReadOnlyList<Citation> citations;
         int validCount;
@@ -296,6 +364,16 @@ public sealed class RagPipeline : IRagPipeline
             (citations, validCount, invalidCount) = ParseAndMapCitations(answer, prep.RagContext.SourceMap);
         }
 
+        bool requiredCitationsSatisfied;
+        if (prep.RagContext.Sources.Count == 0 || SignalsInsufficientContext(answer))
+        {
+            requiredCitationsSatisfied = true;
+        }
+        else
+        {
+            requiredCitationsSatisfied = validCount > 0 && invalidCount == 0;
+        }
+
         var diagnostics = new RagDiagnostics(
             TotalLatency: prep.Stopwatch.Elapsed,
             RetrievedCandidateCount: prep.CandidatePool.Count,
@@ -307,7 +385,9 @@ public sealed class RagPipeline : IRagPipeline
             ValidCitationCount: validCount,
             InvalidCitationCount: invalidCount,
             RetrievalLatency: prep.RetrievalLatency,
-            GenerationLatency: generationLatency);
+            GenerationLatency: generationLatency,
+            RequiredCitationsSatisfied: requiredCitationsSatisfied,
+            HasInternalMarkerLeakage: false);
 
         return new RagResponse(answer, citations, prep.RagContext.Sources, diagnostics);
     }

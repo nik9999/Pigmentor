@@ -14,7 +14,8 @@ public static class TableChunker
         TableBlock tableBlock,
         DocumentMetadata metadata,
         ref int chunkIndexCounter,
-        int maxRowsPerChunk = DefaultMaxRowsPerChunk)
+        int maxRowsPerChunk = DefaultMaxRowsPerChunk,
+        string? contextHeader = null)
     {
         ArgumentNullException.ThrowIfNull(tableBlock);
         ArgumentNullException.ThrowIfNull(metadata);
@@ -24,7 +25,8 @@ public static class TableChunker
 
         if (totalRows <= maxRowsPerChunk)
         {
-            var text = tableBlock.Text;
+            var rawText = tableBlock.Text;
+            var text = string.IsNullOrWhiteSpace(contextHeader) ? rawText : $"{contextHeader}\n\n{rawText}";
             var provStr = tableBlock.Provenance.ToCitationReference();
             var chunk = new DocumentChunk(
                 ChunkId: FormattableString.Invariant($"{metadata.Id}#{chunkIndexCounter++}"),
@@ -53,7 +55,8 @@ public static class TableChunker
                 Rows = sliceRows
             };
 
-            var chunkText = subTable.ToMarkdownTable();
+            var rawChunkText = subTable.ToMarkdownTable();
+            var chunkText = string.IsNullOrWhiteSpace(contextHeader) ? rawChunkText : $"{contextHeader}\n\n{rawChunkText}";
             var rowStart = baseRowStart + start;
             var rowEnd = baseRowStart + start + count - 1;
 

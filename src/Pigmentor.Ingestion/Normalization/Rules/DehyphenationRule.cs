@@ -18,6 +18,10 @@ public static partial class DehyphenationRule
     [GeneratedRegex(@"(\p{Lu}\p{Ll}+)-\r?\n(\p{Lu}[\p{Lu}\p{Nd}]+)")]
     private static partial Regex TitleHyphenSplitRegex();
 
+    // Pattern 3: Technical token hyphen spacing (e.g. "RS- 485" -> "RS-485", "AI- 8UI" -> "AI-8UI")
+    [GeneratedRegex(@"\b([A-Za-z]{2,8})-\s+([0-9]+[A-Za-z0-9/]*)\b")]
+    private static partial Regex TechnicalIdentifierSplitRegex();
+
     public static ExtractedBlock Normalize(ExtractedBlock block, NormalizationDiagnostics diagnostics)
     {
         ArgumentNullException.ThrowIfNull(block);
@@ -80,6 +84,16 @@ public static partial class DehyphenationRule
                 diagnostics.DehyphenationRepairs++;
             }
             return m.Groups[1].Value + " " + m.Groups[2].Value;
+        });
+
+        // 3. Repair technical identifier splits: "RS- 485" -> "RS-485", "AI- 8UI" -> "AI-8UI"
+        result = TechnicalIdentifierSplitRegex().Replace(result, m =>
+        {
+            if (diagnostics != null)
+            {
+                diagnostics.DehyphenationRepairs++;
+            }
+            return m.Groups[1].Value + "-" + m.Groups[2].Value;
         });
 
         return result;

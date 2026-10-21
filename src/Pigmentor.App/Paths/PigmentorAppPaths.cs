@@ -58,7 +58,48 @@ public sealed class PigmentorAppPaths : IPigmentorAppPaths
             return Path.GetFullPath(trimmed);
         }
 
-        return Path.GetFullPath(Path.Combine(ApplicationBaseDirectory, trimmed));
+        var direct = Path.GetFullPath(Path.Combine(ApplicationBaseDirectory, trimmed));
+        if (File.Exists(direct) || Directory.Exists(direct))
+        {
+            return direct;
+        }
+
+        // Cross-platform case fallback (e.g. Models/ vs models/ on case-sensitive filesystems like Linux)
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var fallback = ResolveCaseInsensitivePath(ApplicationBaseDirectory, trimmed);
+            if (fallback != null)
+            {
+                return fallback;
+            }
+        }
+
+        return direct;
+    }
+
+    private static string? ResolveCaseInsensitivePath(string baseDir, string relativePath)
+    {
+        var parts = relativePath.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        var current = baseDir;
+
+        foreach (var part in parts)
+        {
+            if (!Directory.Exists(current))
+            {
+                return null;
+            }
+
+            var entries = Directory.GetFileSystemEntries(current);
+            var match = entries.FirstOrDefault(e => string.Equals(Path.GetFileName(e), part, StringComparison.OrdinalIgnoreCase));
+            if (match == null)
+            {
+                return null;
+            }
+
+            current = match;
+        }
+
+        return Path.GetFullPath(current);
     }
 
     public string ResolveEffectiveRootPath(string? configuredRootPath)

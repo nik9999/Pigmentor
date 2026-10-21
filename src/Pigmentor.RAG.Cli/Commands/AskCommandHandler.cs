@@ -156,6 +156,7 @@ public sealed class AskCommandHandler
         _console.WriteLine($"  Sources used:         {diag.ContextSourceCount}");
         _console.WriteLine($"  Valid citations:      {diag.ValidCitationCount}");
         _console.WriteLine($"  Invalid citations:    {diag.InvalidCitationCount}");
+        _console.WriteLine($"  Required citations satisfied: {diag.RequiredCitationsSatisfied.ToString().ToLowerInvariant()}");
         _console.WriteLine($"  Prompt tokens:        {diag.PromptTokenCount}");
         _console.WriteLine($"  Latency:              {diag.TotalLatencyMs} ms");
     }

@@ -21,5 +21,27 @@
     <ProjectReference Include="..\Pigmentor.VectorStore.SqliteVec\Pigmentor.VectorStore.SqliteVec.csproj" />
   </ItemGroup>
 
+  <!-- Canonical Models production assets deployment -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\..\Models\**"
+          Exclude="$(MSBuildThisFileDirectory)..\..\Models\*.md;$(MSBuildThisFileDirectory)..\..\Models\**\*.md;$(MSBuildThisFileDirectory)..\..\Models\**\.gitkeep"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\Models')">
+      <Link>Models\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <Target Name="CheckBgeM3ModelAssets" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <_ModelSourceDir>$(MSBuildThisFileDirectory)..\..\Models\bge-m3</_ModelSourceDir>
+      <_ModelFile>$(_ModelSourceDir)\model.onnx</_ModelFile>
+      <_TokenizerFile>$(_ModelSourceDir)\tokenizer.json</_TokenizerFile>
+    </PropertyGroup>
+    <Warning Condition="!Exists('$(_ModelFile)') Or !Exists('$(_TokenizerFile)')"
+             Text="BGE-M3 production model assets are missing in Models/bge-m3. Run scripts/download-bge-m3.ps1 (or scripts/download-bge-m3.sh) to download them." />
+  </Target>
+
 </Project>
 

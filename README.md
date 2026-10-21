@@ -17,6 +17,54 @@ Pigmentor applications target **Windows** and **Linux** only:
 > [!NOTE]
 > macOS is not supported.
 
+## Quick Start & Model Setup
+
+### 1. Clone & Download BGE-M3 Production Model Assets
+
+```bash
+git clone https://github.com/nik9999/Pigmentor.git
+cd Pigmentor
+```
+
+Download the official BAAI BGE-M3 ONNX runtime assets:
+
+**Windows (PowerShell):**
+```powershell
+./scripts/download-bge-m3.ps1
+```
+*(Or use `./scripts/download-bge-m3.ps1 -Quantized` for the single-file int8 ~568 MB model).*
+
+**Linux (Bash):**
+```bash
+chmod +x ./scripts/download-bge-m3.sh
+./scripts/download-bge-m3.sh
+```
+
+### 2. Model Asset Storage & Deployment Architecture
+
+```text
+Models/bge-m3/               <- Canonical repository source assets (ignored by Git)
+    ├── model.onnx
+    ├── model.onnx_data       (if using official FP32 graph)
+    └── tokenizer.json
+          │
+    [dotnet build / publish]
+          ↓
+bin/.../Models/bge-m3/       <- Deployed runtime copy (relative to AppContext.BaseDirectory)
+```
+
+> [!NOTE]
+> **Git Policy:** Multi-GB model weights (`*.onnx`, `*.onnx_data`, `*.bin`, `*.bpe.model`) and large tokenizer definitions (`tokenizer.json`) are deliberately excluded from Git via `.gitignore`.
+> Only `Models/bge-m3/README.md` and `Models/bge-m3/.gitkeep` are tracked in version control.
+> Unit and integration test suites run entirely on lightweight, deterministic fixtures in `tests/Pigmentor.Tests/Fixtures/` and never depend on downloading multi-GB production models.
+
+### 3. Build & Verify
+
+```powershell
+dotnet build Pigmentor.slnx
+dotnet test Pigmentor.slnx
+```
+
 ## Architectural Layers
 
 - `Pigmentor.Core`: Domain primitives, ports, abstractions, chunking structures, and configuration contracts.

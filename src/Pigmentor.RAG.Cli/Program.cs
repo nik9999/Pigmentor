@@ -14,6 +14,16 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        try
+        {
+            System.Console.OutputEncoding = System.Text.Encoding.UTF8;
+            System.Console.InputEncoding = System.Text.Encoding.UTF8;
+        }
+        catch
+        {
+            // Best effort in non-standard or redirected console environments
+        }
+
         using var cts = new CancellationTokenSource();
 
         System.Console.CancelKeyPress += (sender, eventArgs) =>

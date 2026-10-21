@@ -21,6 +21,17 @@
 .env.*
 !.env.example
 appsettings*.local.json
+# Runtime model weights and large binary assets
+[Mm]odels/**/*.onnx
+[Mm]odels/**/*.onnx_data
+[Mm]odels/**/*.bin
+[Mm]odels/**/*.bpe.model
+[Mm]odels/**/*.json
+[Mm]odels/**/Constant_*
 models/
+!Models/
+!Models/**/
+!Models/**/.gitkeep
+!Models/**/README.md
 artifacts/
 

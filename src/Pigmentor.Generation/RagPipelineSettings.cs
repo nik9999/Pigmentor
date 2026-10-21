@@ -6,7 +6,7 @@ namespace Pigmentor.Generation;
 public sealed record RagPipelineSettings
 {
     private int _defaultTopK = 5;
-    private ContextBudget _budget = new(MaxTotalTokens: 2048, ReservedOutputTokens: 512);
+    private ContextBudget _budget = new(MaxTotalTokens: 8192, ReservedOutputTokens: 1024);
     private ContextBuilderOptions _contextOptions = new();
 
     /// <summary>Default candidate pool size to retrieve. Must be positive. Default is 5.</summary>
@@ -23,7 +23,7 @@ public sealed record RagPipelineSettings
         }
     }
 
-    /// <summary>Token budget for context building. Default is 2048 total with 512 reserved output.</summary>
+    /// <summary>Token budget for context building. Default is 8192 total with 1024 reserved output.</summary>
     public ContextBudget Budget
     {
         get => _budget;

@@ -25,7 +25,9 @@ public sealed record RagDiagnostics(
     int ValidCitationCount = 0,
     int InvalidCitationCount = 0,
     TimeSpan? RetrievalLatency = null,
-    TimeSpan? GenerationLatency = null)
+    TimeSpan? GenerationLatency = null,
+    bool RequiredCitationsSatisfied = true,
+    bool HasInternalMarkerLeakage = false)
 {
     /// <summary>Total execution time in milliseconds.</summary>
     public long TotalLatencyMs => (long)TotalLatency.TotalMilliseconds;

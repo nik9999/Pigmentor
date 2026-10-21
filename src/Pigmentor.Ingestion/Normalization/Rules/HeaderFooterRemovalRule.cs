@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Pigmentor.Core.Documents;
 
 namespace Pigmentor.Ingestion.Normalization.Rules;
@@ -5,11 +6,14 @@ namespace Pigmentor.Ingestion.Normalization.Rules;
 /// <summary>
 /// Detects and strips repeated running headers and footers across pages in paginated documents.
 /// </summary>
-public static class HeaderFooterRemovalRule
+public static partial class HeaderFooterRemovalRule
 {
     private const int MinDocumentPages = 3;
     private const double OccurrenceThreshold = 0.65;
     private const int MaxHeaderFooterLength = 160;
+
+    [GeneratedRegex(@"\b\d+\b")]
+    private static partial Regex DigitsRegex();
 
     public static IReadOnlyList<ExtractedBlock> Normalize(
         IReadOnlyList<ExtractedBlock> blocks,
@@ -39,8 +43,11 @@ public static class HeaderFooterRemovalRule
 
         // Detect running headers (first line of first text block on page)
         var firstLines = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var firstTemplates = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         // Detect running footers (last line of last text block on page)
         var lastLines = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var lastTemplates = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var page in pageGroups)
         {
@@ -57,6 +64,11 @@ public static class HeaderFooterRemovalRule
                 if (fl.Length is > 3 and <= MaxHeaderFooterLength)
                 {
                     firstLines[fl] = firstLines.GetValueOrDefault(fl) + 1;
+                    var tmpl = NormalizeTemplate(fl);
+                    if (tmpl.Length > 5)
+                    {
+                        firstTemplates[tmpl] = firstTemplates.GetValueOrDefault(tmpl) + 1;
+                    }
                 }
             }
 
@@ -67,6 +79,11 @@ public static class HeaderFooterRemovalRule
                 if (ll.Length is > 3 and <= MaxHeaderFooterLength)
                 {
                     lastLines[ll] = lastLines.GetValueOrDefault(ll) + 1;
+                    var tmpl = NormalizeTemplate(ll);
+                    if (tmpl.Length > 5)
+                    {
+                        lastTemplates[tmpl] = lastTemplates.GetValueOrDefault(tmpl) + 1;
+                    }
                 }
             }
         }
@@ -76,12 +93,23 @@ public static class HeaderFooterRemovalRule
             .Select(kvp => kvp.Key)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        var repeatedHeaderTemplates = firstTemplates
+            .Where(kvp => (double)kvp.Value / totalPages >= OccurrenceThreshold)
+            .Select(kvp => kvp.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         var repeatedFooters = lastLines
             .Where(kvp => (double)kvp.Value / totalPages >= OccurrenceThreshold)
             .Select(kvp => kvp.Key)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        if (repeatedHeaders.Count == 0 && repeatedFooters.Count == 0)
+        var repeatedFooterTemplates = lastTemplates
+            .Where(kvp => (double)kvp.Value / totalPages >= OccurrenceThreshold)
+            .Select(kvp => kvp.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (repeatedHeaders.Count == 0 && repeatedFooters.Count == 0 &&
+            repeatedHeaderTemplates.Count == 0 && repeatedFooterTemplates.Count == 0)
         {
             return blocks;
         }
@@ -90,32 +118,46 @@ public static class HeaderFooterRemovalRule
 
         foreach (var block in blocks)
         {
-            if (block is not TextBlock tb)
+            if (block is not TextBlock and not HeadingBlock)
             {
                 result.Add(block);
                 continue;
             }
 
-            var lines = GetLines(tb.Text);
+            var lines = GetLines(block.Text);
             var modified = false;
 
-            if (lines.Count > 0 && repeatedHeaders.Contains(lines[0].Trim()))
+            if (lines.Count > 0)
             {
-                lines.RemoveAt(0);
-                diagnostics.RemovedHeaders++;
-                modified = true;
+                var fl = lines[0].Trim();
+                if (repeatedHeaders.Contains(fl) || repeatedHeaderTemplates.Contains(NormalizeTemplate(fl)))
+                {
+                    lines.RemoveAt(0);
+                    diagnostics.RemovedHeaders++;
+                    modified = true;
+                }
             }
 
-            if (lines.Count > 0 && repeatedFooters.Contains(lines[^1].Trim()))
+            if (lines.Count > 0)
             {
-                lines.RemoveAt(lines.Count - 1);
-                diagnostics.RemovedFooters++;
-                modified = true;
+                var ll = lines[^1].Trim();
+                if (repeatedFooters.Contains(ll) || repeatedFooterTemplates.Contains(NormalizeTemplate(ll)))
+                {
+                    lines.RemoveAt(lines.Count - 1);
+                    diagnostics.RemovedFooters++;
+                    modified = true;
+                }
             }
 
             if (modified)
             {
-                result.Add(tb with { Text = string.Join("\n", lines).Trim() });
+                var newText = string.Join("\n", lines).Trim();
+                result.Add(block switch
+                {
+                    TextBlock tb => tb with { Text = newText },
+                    HeadingBlock hb => hb with { Text = newText },
+                    _ => block
+                });
             }
             else
             {
@@ -125,6 +167,8 @@ public static class HeaderFooterRemovalRule
 
         return result;
     }
+
+    private static string NormalizeTemplate(string line) => DigitsRegex().Replace(line, "").Trim();
 
     private static List<string> GetLines(string text)
     {

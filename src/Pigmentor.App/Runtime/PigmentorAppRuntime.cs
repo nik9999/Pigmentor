@@ -81,6 +81,11 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
 
         // Use Hosting baseline
         var builder = services.AddPigmentor();
+        services.Configure<RagPipelineSettings>(options =>
+        {
+            options.Budget = new ContextBudget(MaxTotalTokens: 8192, ReservedOutputTokens: 1024);
+            options.DefaultTopK = 5;
+        });
 
         // 2. Chat Client setup
         if (chatClientOverride != null)
