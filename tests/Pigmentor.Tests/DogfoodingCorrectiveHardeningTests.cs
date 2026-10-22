@@ -248,6 +248,50 @@ public sealed class DogfoodingCorrectiveHardeningTests
     }
 
     [Fact]
+    public void QueryScopeResolver_MatchesCustomScopeRulesDynamically()
+    {
+        var customConfig = new ScopeRulesConfig
+        {
+            Scopes =
+            [
+                new ScopeRule
+                {
+                    Silo = "financial-reports",
+                    TriggerPhrases = ["в финансовом отчете", "по финансовой отчетности"],
+                    TriggerTerms = ["выручка", "прибыль", "дивиденды", "баланс", "отчетность"],
+                    EntityPatterns = [@"FIN-\d+"]
+                }
+            ]
+        };
+
+        var matchedFilter1 = QueryScopeResolver.ResolveScope("Какова чистая прибыль компании в финансовом отчете?", customConfig);
+        Assert.NotNull(matchedFilter1);
+        var finMeta = new DocumentMetadata("fin1", Silo: "financial-reports", "", "", "", "Report", 2026, "", DateOnly.MinValue, "Report");
+        var catMeta = new DocumentMetadata("cat1", Silo: "product-catalog", "", "", "", "Sheet", 2026, "", DateOnly.MinValue, "Catalog");
+        Assert.True(matchedFilter1.Matches(finMeta));
+        Assert.False(matchedFilter1.Matches(catMeta));
+
+        var matchedFilter2 = QueryScopeResolver.ResolveScope("Какие дивиденды по бумаге FIN-100?", customConfig);
+        Assert.NotNull(matchedFilter2);
+        Assert.True(matchedFilter2.Matches(finMeta));
+
+        var genericFilter = QueryScopeResolver.ResolveScope("Для чего предназначен MDS AI-8UI?", customConfig);
+        Assert.Null(genericFilter);
+    }
+
+    [Fact]
+    public void QueryScopeResolver_LoadsConfigurationFileOrDefaults()
+    {
+        var config = QueryScopeResolver.LoadConfig();
+        Assert.NotNull(config);
+        Assert.NotEmpty(config.Scopes);
+        Assert.Equal("product-catalog", config.Scopes[0].Silo);
+        Assert.Contains("из каталога", config.Scopes[0].TriggerPhrases);
+        Assert.Contains("товар", config.Scopes[0].TriggerTerms);
+        Assert.Contains(@"TM-\d+", config.Scopes[0].EntityPatterns);
+    }
+
+    [Fact]
     public void EvidenceValidator_ValidatesModelIdentifierAndUnitValues()
     {
         var meta = new DocumentMetadata("doc1", "", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "Manual");

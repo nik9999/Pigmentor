@@ -1360,6 +1360,52 @@ public sealed class RagPipelineTests
         Assert.Contains("Оцени утверждение", evalPrompt);
         Assert.Contains("SUPPORTED", evalPrompt);
     }
+
+    [Fact]
+    public async Task InferredScopeFallback_DropsFilterWhenCandidateCountBelowThreshold()
+    {
+        var finMeta = new DocumentMetadata("fin1", Silo: "financial-reports", "", "", "", "Report", 2026, "", DateOnly.MinValue, "Report");
+        var chunk1 = new DocumentChunk("fin1#1", "fin1", 0, "Товары компании принесли прибыль 100 млн рублей.", 0, 50, finMeta);
+        var chunk2 = new DocumentChunk("fin1#2", "fin1", 1, "Чистая выручка составила 200 млн рублей.", 0, 50, finMeta);
+
+        // Fake retriever only contains chunks in financial-reports (0 in product-catalog)
+        var retriever = new FakeRetriever([
+            new RetrievalResult(chunk1, 0.95),
+            new RetrievalResult(chunk2, 0.90)
+        ]);
+
+        var chat = new FakeChatGenerator("Товары принесли прибыль [S1].");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        // Query triggers product-catalog scope ("товар" + "прибыль")
+        const string question = "Какой товар имеет наибольшую прибыль в отчете?";
+        var response = await pipeline.AskAsync(new RagRequest(question, topK: 8));
+
+        // Inferred filter on product-catalog yielded 0 candidates (< 8/2).
+        // Fallback should run and retrieve the financial-reports chunks.
+        Assert.NotNull(response);
+        Assert.NotEmpty(response.Sources);
+        Assert.Equal("fin1#1", response.Sources[0].Chunk.ChunkId);
+    }
+
+    [Fact]
+    public async Task ExplicitMetadataFilter_NeverDropsFilterEvenIfCandidateCountBelowThreshold()
+    {
+        var finMeta = new DocumentMetadata("fin1", Silo: "financial-reports", "", "", "", "Report", 2026, "", DateOnly.MinValue, "Report");
+        var chunk = new DocumentChunk("fin1#1", "fin1", 0, "Выручка 100 млн.", 0, 20, finMeta);
+
+        var retriever = new FakeRetriever([new RetrievalResult(chunk, 0.95)]);
+        var chat = new FakeChatGenerator("Ответ без источников");
+        var pipeline = new RagPipeline(retriever, chat);
+
+        // Explicit user filter for product-catalog
+        var explicitFilter = MetadataFilter.Where(m => m.Silo == "product-catalog");
+        var response = await pipeline.AskAsync(new RagRequest("Вопрос", topK: 8, metadataFilter: explicitFilter));
+
+        // Explicit filter must NEVER be dropped, sources should be empty
+        Assert.NotNull(response);
+        Assert.Empty(response.Sources);
+    }
 }
 
 internal sealed class RecordingReranker : IReranker

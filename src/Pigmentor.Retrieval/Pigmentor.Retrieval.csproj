@@ -23,4 +23,14 @@
     <InternalsVisibleTo Include="Pigmentor.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\..\data\scope-rules.json"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\data\scope-rules.json')">
+      <Link>data\scope-rules.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
 </Project>

@@ -356,9 +356,22 @@ public sealed class RagPipeline : IRagPipeline
 
         // 1. Candidate retrieval (with explicit query scope resolution if no filter was passed)
         var retrievalSw = Stopwatch.StartNew();
-        var effectiveFilter = request.MetadataFilter ?? QueryScopeResolver.ResolveScope(request.Question);
+        var inferredFilter = request.MetadataFilter is null ? QueryScopeResolver.ResolveScope(request.Question) : null;
+        var effectiveFilter = request.MetadataFilter ?? inferredFilter;
         var retrievalRequest = new RetrievalRequest(request.Question, topK, effectiveFilter);
         var candidatePool = await _retriever.RetrieveAsync(retrievalRequest, cancellationToken).ConfigureAwait(false);
+
+        // Fallback: if an inferred scope yielded too few candidates (< topK / 2),
+        // remove the inferred filter and repeat retrieval across the full corpus to avoid false-positive silo lock-in.
+        if (request.MetadataFilter is null && inferredFilter is not null && candidatePool.Count < Math.Max(1, topK / 2))
+        {
+            var fallbackPool = await _retriever.RetrieveAsync(new RetrievalRequest(request.Question, topK, null), cancellationToken).ConfigureAwait(false);
+            if (fallbackPool.Count > candidatePool.Count)
+            {
+                candidatePool = fallbackPool;
+                effectiveFilter = null; // Clear effectiveFilter so post-filtering doesn't discard fallback candidates
+            }
+        }
 
         // Multi-source entity retrieval (§3): if the query mentions specific model identifiers, retrieve targeted candidates
         var identifiers = ExtractEntityIdentifiers(request.Question);
