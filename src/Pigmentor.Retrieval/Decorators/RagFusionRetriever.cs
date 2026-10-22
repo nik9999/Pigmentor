@@ -66,11 +66,6 @@ public sealed class RagFusionRetriever : IRetriever
         {
             return Array.Empty<RetrievalResult>();
         }
-        var merged = lists[0];
-        for (int i = 1; i < lists.Length; i++)
-        {
-            merged = _merger.Merge(merged, lists[i], request.TopK * 2);
-        }
-        return [.. merged.Take(request.TopK)];
+        return _merger.Merge(lists, request.TopK);
     }
 }

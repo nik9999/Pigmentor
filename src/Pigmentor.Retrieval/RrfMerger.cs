@@ -34,27 +34,38 @@ public sealed class RrfMerger
     {
         ArgumentNullException.ThrowIfNull(a);
         ArgumentNullException.ThrowIfNull(b);
+        return Merge([a, b], topK);
+    }
+
+    /// <summary>Fuse two or more result lists by reciprocal rank.</summary>
+    public IReadOnlyList<RetrievalResult> Merge(
+        IEnumerable<IReadOnlyList<RetrievalResult>> lists,
+        int topK)
+    {
+        ArgumentNullException.ThrowIfNull(lists);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
 
         var fused = new Dictionary<string, (DocumentChunk Chunk, double Score)>(StringComparer.Ordinal);
 
-        for (int i = 0; i < a.Count; i++)
+        foreach (var list in lists)
         {
-            var key = a[i].Chunk.ChunkId;
-            var contribution = 1.0 / (K + i + 1);
-            fused[key] = (a[i].Chunk, contribution);
-        }
-        for (int i = 0; i < b.Count; i++)
-        {
-            var key = b[i].Chunk.ChunkId;
-            var contribution = 1.0 / (K + i + 1);
-            if (fused.TryGetValue(key, out var existing))
+            if (list is null)
             {
-                fused[key] = (existing.Chunk, existing.Score + contribution);
+                continue;
             }
-            else
+
+            for (int i = 0; i < list.Count; i++)
             {
-                fused[key] = (b[i].Chunk, contribution);
+                var key = list[i].Chunk.ChunkId;
+                var contribution = 1.0 / (K + i + 1);
+                if (fused.TryGetValue(key, out var existing))
+                {
+                    fused[key] = (existing.Chunk, existing.Score + contribution);
+                }
+                else
+                {
+                    fused[key] = (list[i].Chunk, contribution);
+                }
             }
         }
 

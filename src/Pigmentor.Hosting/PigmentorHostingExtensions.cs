@@ -47,10 +47,11 @@ public static class PigmentorHostingExtensions
             var contextBuilder = sp.GetService<IContextBuilder>();
             var tokenCounter = sp.GetService<ITokenCounter>();
             var settings = sp.GetService<IOptions<RagPipelineSettings>>()?.Value;
+            var rrfMerger = sp.GetService<Pigmentor.Retrieval.RrfMerger>();
 
             return chatGenerator != null
-                ? new RagPipeline(retriever, chatGenerator, reranker, contextBuilder, tokenCounter, settings)
-                : new RagPipeline(retriever, chatClient!, reranker, contextBuilder, tokenCounter, settings);
+                ? new RagPipeline(retriever, chatGenerator, reranker, contextBuilder, tokenCounter, settings, rrfMerger)
+                : new RagPipeline(retriever, chatClient!, reranker, contextBuilder, tokenCounter, settings, rrfMerger);
         });
         services.TryAddTransient<RagPipeline>(sp => (RagPipeline)sp.GetRequiredService<IRagPipeline>());
 

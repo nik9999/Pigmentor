@@ -587,6 +587,101 @@ public sealed class RagPipelineTests
     }
 
     [Fact]
+    public void EntityCandidateMerge_WhenPrimaryIsFull_FusesEntityCandidatesViaRrfInsteadOfDiscarding()
+    {
+        var meta = new DocumentMetadata("doc", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc");
+        IReadOnlyList<RetrievalResult> CreateList(string prefix, int count) => Enumerable.Range(0, count)
+            .Select(i => new RetrievalResult(
+                new DocumentChunk($"{prefix}#{i}", $"{prefix}-{i}", i, $"{prefix} content {i}", 0, 15, meta),
+                1.0 - (i * 0.05)))
+            .ToList();
+
+        var primary = CreateList("primary", 8);
+        var secondary = CreateList("entity", 8);
+
+        var pipeline = new RagPipeline(
+            new FakeRetriever(primary),
+            new FakeChatGenerator("dummy"));
+
+        // When primary is completely full (8 items) and maxCount is 8:
+        var merged = pipeline.MergeEntityCandidates(primary, secondary, maxCount: 8);
+
+        Assert.Equal(8, merged.Count);
+        // Entity candidates MUST NOT be completely discarded; RRF should interleave top candidates from both lists
+        var entityCount = merged.Count(r => r.Chunk.DocumentId.StartsWith("entity-", StringComparison.Ordinal));
+        var primaryCount = merged.Count(r => r.Chunk.DocumentId.StartsWith("primary-", StringComparison.Ordinal));
+
+        Assert.Equal(4, primaryCount);
+        Assert.Equal(4, entityCount);
+        // Verify RRF alternating order: P0, E0, P1, E1, P2, E2, P3, E3
+        Assert.Equal("primary#0", merged[0].Chunk.ChunkId);
+        Assert.Equal("entity#0", merged[1].Chunk.ChunkId);
+        Assert.Equal("primary#1", merged[2].Chunk.ChunkId);
+        Assert.Equal("entity#1", merged[3].Chunk.ChunkId);
+    }
+
+    [Fact]
+    public void EntityCandidateMerge_MultipleEntityLists_FusesAllViaRrf()
+    {
+        var meta = new DocumentMetadata("doc", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc");
+        IReadOnlyList<RetrievalResult> CreateList(string prefix, int count) => Enumerable.Range(0, count)
+            .Select(i => new RetrievalResult(
+                new DocumentChunk($"{prefix}#{i}", $"{prefix}-{i}", i, $"{prefix} content {i}", 0, 15, meta),
+                1.0 - (i * 0.05)))
+            .ToList();
+
+        var primary = CreateList("primary", 6);
+        var entity1 = CreateList("tm200", 6);
+        var entity2 = CreateList("pr25", 6);
+
+        var pipeline = new RagPipeline(
+            new FakeRetriever(primary),
+            new FakeChatGenerator("dummy"));
+
+        IReadOnlyList<IReadOnlyList<RetrievalResult>> entityLists = [entity1, entity2];
+        var merged = pipeline.MergeEntityCandidates(primary, entityLists, maxCount: 6);
+
+        Assert.Equal(6, merged.Count);
+        Assert.Contains(merged, r => r.Chunk.DocumentId.StartsWith("primary-", StringComparison.Ordinal));
+        Assert.Contains(merged, r => r.Chunk.DocumentId.StartsWith("tm200-", StringComparison.Ordinal));
+        Assert.Contains(merged, r => r.Chunk.DocumentId.StartsWith("pr25-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void RrfMerger_MultiList_CombinesAndBoostsOverlappingCandidates()
+    {
+        var meta = new DocumentMetadata("doc", "", "", "", "", "Spec", 0, "", DateOnly.MinValue, "Doc");
+        var chunkShared = new DocumentChunk("shared", "shared-doc", 0, "Shared chunk", 0, 12, meta);
+        var chunkA = new DocumentChunk("a", "doc-a", 1, "Chunk A", 0, 7, meta);
+        var chunkB = new DocumentChunk("b", "doc-b", 2, "Chunk B", 0, 7, meta);
+        var chunkC = new DocumentChunk("c", "doc-c", 3, "Chunk C", 0, 7, meta);
+
+        var list1 = new List<RetrievalResult>
+        {
+            new(chunkA, 0.9),
+            new(chunkShared, 0.8),
+        };
+        var list2 = new List<RetrievalResult>
+        {
+            new(chunkShared, 0.95),
+            new(chunkB, 0.7),
+        };
+        var list3 = new List<RetrievalResult>
+        {
+            new(chunkShared, 0.85),
+            new(chunkC, 0.6),
+        };
+
+        var merger = new Pigmentor.Retrieval.RrfMerger(k: 60);
+        var fused = merger.Merge([list1, list2, list3], topK: 4);
+
+        Assert.Equal(4, fused.Count);
+        // "shared" appears in all 3 lists, so its combined reciprocal rank score must dominate and be #1
+        Assert.Equal("shared", fused[0].Chunk.ChunkId);
+        Assert.True(fused[0].Score > fused[1].Score);
+    }
+
+    [Fact]
     public void TableQueryExecutor_EnumeratesRequestedCurrentRows()
     {
         var context = CreateTableContext("""

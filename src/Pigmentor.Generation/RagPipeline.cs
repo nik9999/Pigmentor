@@ -56,6 +56,7 @@ public sealed class RagPipeline : IRagPipeline
     private readonly IContextBuilder _contextBuilder;
     private readonly ITokenCounter _tokenCounter;
     private readonly RagPipelineSettings _settings;
+    private readonly RrfMerger _rrfMerger;
 
     /// <summary>
     /// The runtime settings configuring this RAG pipeline instance.
@@ -98,8 +99,9 @@ public sealed class RagPipeline : IRagPipeline
         IReranker? reranker = null,
         IContextBuilder? contextBuilder = null,
         ITokenCounter? tokenCounter = null,
-        RagPipelineSettings? settings = null)
-        : this(retriever, new ChatClientGenerator(chatClient), reranker, contextBuilder, tokenCounter, settings)
+        RagPipelineSettings? settings = null,
+        RrfMerger? rrfMerger = null)
+        : this(retriever, new ChatClientGenerator(chatClient), reranker, contextBuilder, tokenCounter, settings, rrfMerger)
     {
     }
 
@@ -109,8 +111,9 @@ public sealed class RagPipeline : IRagPipeline
         IOptions<RagPipelineSettings> settingsOptions,
         IReranker? reranker = null,
         IContextBuilder? contextBuilder = null,
-        ITokenCounter? tokenCounter = null)
-        : this(retriever, new ChatClientGenerator(chatClient), reranker, contextBuilder, tokenCounter, settingsOptions?.Value)
+        ITokenCounter? tokenCounter = null,
+        RrfMerger? rrfMerger = null)
+        : this(retriever, new ChatClientGenerator(chatClient), reranker, contextBuilder, tokenCounter, settingsOptions?.Value, rrfMerger)
     {
     }
 
@@ -121,8 +124,9 @@ public sealed class RagPipeline : IRagPipeline
         IOptions<RagPipelineSettings> settingsOptions,
         IReranker? reranker = null,
         IContextBuilder? contextBuilder = null,
-        ITokenCounter? tokenCounter = null)
-        : this(retriever, chat, reranker, contextBuilder, tokenCounter, settingsOptions?.Value)
+        ITokenCounter? tokenCounter = null,
+        RrfMerger? rrfMerger = null)
+        : this(retriever, chat, reranker, contextBuilder, tokenCounter, settingsOptions?.Value, rrfMerger)
     {
     }
 
@@ -132,7 +136,8 @@ public sealed class RagPipeline : IRagPipeline
         IReranker? reranker = null,
         IContextBuilder? contextBuilder = null,
         ITokenCounter? tokenCounter = null,
-        RagPipelineSettings? settings = null)
+        RagPipelineSettings? settings = null,
+        RrfMerger? rrfMerger = null)
     {
         _retriever = retriever ?? throw new ArgumentNullException(nameof(retriever));
         _chat = chat ?? throw new ArgumentNullException(nameof(chat));
@@ -140,6 +145,7 @@ public sealed class RagPipeline : IRagPipeline
         _settings = settings ?? new RagPipelineSettings();
         _tokenCounter = tokenCounter ?? new TokenCounter();
         _contextBuilder = contextBuilder ?? new ContextBuilder(_tokenCounter, _settings.ContextOptions with { Budget = _settings.Budget });
+        _rrfMerger = rrfMerger ?? new RrfMerger(k: 60);
     }
 
     /// <inheritdoc />
@@ -354,17 +360,20 @@ public sealed class RagPipeline : IRagPipeline
         var identifiers = ExtractEntityIdentifiers(request.Question);
         if (identifiers.Count > 0)
         {
-            var entityCandidatesList = new List<RetrievalResult>();
+            var entityLists = new List<IReadOnlyList<RetrievalResult>>();
             foreach (var identifier in identifiers)
             {
                 var entityReq = new RetrievalRequest(identifier, topK, effectiveFilter);
                 var entityRes = await _retriever.RetrieveAsync(entityReq, cancellationToken).ConfigureAwait(false);
-                entityCandidatesList.AddRange(entityRes);
+                if (entityRes.Count > 0)
+                {
+                    entityLists.Add(entityRes);
+                }
             }
 
-            if (entityCandidatesList.Count > 0)
+            if (entityLists.Count > 0)
             {
-                candidatePool = MergeEntityCandidates(candidatePool, entityCandidatesList, identifiers, topK);
+                candidatePool = MergeEntityCandidates(candidatePool, entityLists, topK);
             }
         }
 
@@ -648,45 +657,43 @@ public sealed class RagPipeline : IRagPipeline
         return list;
     }
 
-    private static List<RetrievalResult> MergeEntityCandidates(
+    internal IReadOnlyList<RetrievalResult> MergeEntityCandidates(
         IReadOnlyList<RetrievalResult> primary,
-        IReadOnlyList<RetrievalResult> secondary,
-        List<string> entityKeywords,
+        IReadOnlyList<IReadOnlyList<RetrievalResult>> entityLists,
         int maxCount)
     {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var combined = new List<RetrievalResult>();
-
-        // Reserve one slot for the best targeted result so a full primary topK
-        // cannot discard the entity lookup before reranking.
-        var bestEntityCandidate = secondary.FirstOrDefault(result =>
-            entityKeywords.Any(keyword =>
-                result.Chunk.Text.Contains(keyword, StringComparison.OrdinalIgnoreCase)));
-        if (bestEntityCandidate is not null && seen.Add(bestEntityCandidate.Chunk.ChunkId))
+        if (entityLists.Count == 0)
         {
-            combined.Add(bestEntityCandidate);
+            return primary;
         }
 
-        // Primary candidates retain their original rank for the remaining slots.
-        foreach (var r in primary)
+        var lists = new List<IReadOnlyList<RetrievalResult>>(entityLists.Count + 1)
         {
-            if (seen.Add(r.Chunk.ChunkId))
-            {
-                combined.Add(r);
-            }
-        }
+            primary
+        };
+        lists.AddRange(entityLists);
 
-        // Supplemental entity candidates fill any remaining capacity.
-        foreach (var r in secondary)
-        {
-            if (seen.Add(r.Chunk.ChunkId))
-            {
-                combined.Add(r);
-            }
-        }
-
-        return combined.Take(maxCount).ToList();
+        return _rrfMerger.Merge(lists, maxCount);
     }
+
+    internal IReadOnlyList<RetrievalResult> MergeEntityCandidates(
+        IReadOnlyList<RetrievalResult> primary,
+        IReadOnlyList<RetrievalResult> secondary,
+        int maxCount)
+    {
+        if (secondary.Count == 0)
+        {
+            return primary;
+        }
+
+        return _rrfMerger.Merge(primary, secondary, maxCount);
+    }
+
+    internal IReadOnlyList<RetrievalResult> MergeEntityCandidates(
+        IReadOnlyList<RetrievalResult> primary,
+        IReadOnlyList<RetrievalResult> secondary,
+        List<string>? entityKeywords,
+        int maxCount) => MergeEntityCandidates(primary, secondary, maxCount);
 
     private sealed record PreparedExecution(
         string Question,
