@@ -56,7 +56,7 @@ public sealed class StepBackRetriever : IRetriever
         var stepBack = (response.Text ?? string.Empty).Trim();
 
         // Pull a deeper candidate pool per leg so the fusion has room to work.
-        var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
+        var candidateK = Math.Max(50, request.TopK);
         var original = await _inner.RetrieveAsync(request with { TopK = candidateK }, cancellationToken).ConfigureAwait(false);
 
         // If the model returned nothing usable, fall back to the original leg

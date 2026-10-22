@@ -35,6 +35,7 @@ public sealed class PigmentorConfigManager
         "embeddings",
         "gigachat",
         "reranker",
+        "retrieval",
         "storage" // Supported for graceful upgrade from older configurations
     };
 
@@ -75,6 +76,15 @@ public sealed class PigmentorConfigManager
         "maxpairsperbatch",
         "maxsequencelength",
         "minscore"
+    };
+
+    private static readonly HashSet<string> AllowedRetrievalProperties = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "candidatepoolperleg",
+        "rrfk",
+        "denseweight",
+        "sparseweight",
+        "legtimeoutseconds"
     };
 
     private readonly IPigmentorAppPaths _paths;
@@ -356,6 +366,47 @@ public sealed class PigmentorConfigManager
                 config.Reranker.MinScore = minSc;
                 break;
 
+            case "retrieval.candidatepoolperleg":
+                if (!int.TryParse(value, out var pool) || pool <= 0)
+                {
+                    throw new ArgumentException("retrieval.candidatepoolperleg must be a positive integer.", nameof(value));
+                }
+                config.Retrieval ??= new RetrievalConfig();
+                config.Retrieval.CandidatePoolPerLeg = pool;
+                break;
+            case "retrieval.rrfk":
+                if (!int.TryParse(value, out var rrfk) || rrfk <= 0)
+                {
+                    throw new ArgumentException("retrieval.rrfk must be a positive integer.", nameof(value));
+                }
+                config.Retrieval ??= new RetrievalConfig();
+                config.Retrieval.RrfK = rrfk;
+                break;
+            case "retrieval.denseweight":
+                if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var dWeight) || dWeight < 0)
+                {
+                    throw new ArgumentException("retrieval.denseweight must be a non-negative number.", nameof(value));
+                }
+                config.Retrieval ??= new RetrievalConfig();
+                config.Retrieval.DenseWeight = dWeight;
+                break;
+            case "retrieval.sparseweight":
+                if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var sWeight) || sWeight < 0)
+                {
+                    throw new ArgumentException("retrieval.sparseweight must be a non-negative number.", nameof(value));
+                }
+                config.Retrieval ??= new RetrievalConfig();
+                config.Retrieval.SparseWeight = sWeight;
+                break;
+            case "retrieval.legtimeoutseconds":
+                if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var timeoutSec) || timeoutSec <= 0)
+                {
+                    throw new ArgumentException("retrieval.legtimeoutseconds must be a positive number.", nameof(value));
+                }
+                config.Retrieval ??= new RetrievalConfig();
+                config.Retrieval.LegTimeoutSeconds = timeoutSec;
+                break;
+
             default:
                 throw new ArgumentException($"Unknown configuration setting: '{key}'.", nameof(key));
         }
@@ -556,6 +607,31 @@ public sealed class PigmentorConfigManager
             }
         }
 
+        // Retrieval
+        if (config.Retrieval != null)
+        {
+            if (config.Retrieval.CandidatePoolPerLeg <= 0)
+            {
+                errors.Add("Retrieval candidatePoolPerLeg must be a positive integer.");
+            }
+            if (config.Retrieval.RrfK <= 0)
+            {
+                errors.Add("Retrieval rrfK must be a positive integer.");
+            }
+            if (config.Retrieval.DenseWeight < 0.0)
+            {
+                errors.Add("Retrieval denseWeight must be non-negative.");
+            }
+            if (config.Retrieval.SparseWeight < 0.0)
+            {
+                errors.Add("Retrieval sparseWeight must be non-negative.");
+            }
+            if (config.Retrieval.LegTimeoutSeconds <= 0.0)
+            {
+                errors.Add("Retrieval legTimeoutSeconds must be positive.");
+            }
+        }
+
         return errors;
     }
 
@@ -588,6 +664,7 @@ public sealed class PigmentorConfigManager
                     "embeddings" => AllowedEmbeddingsProperties,
                     "gigachat" => AllowedGigaChatProperties,
                     "reranker" => AllowedRerankerProperties,
+                    "retrieval" => AllowedRetrievalProperties,
                     "storage" => AllowedStorageProperties,
                     _ => null
                 };

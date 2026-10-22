@@ -59,7 +59,7 @@ public sealed class RagFusionRetriever : IRetriever
         // Always include the original query.
         variants.Insert(0, request.Query);
 
-        var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
+        var candidateK = Math.Max(50, request.TopK);
         var lists = await Task.WhenAll(variants.Select(v => _inner.RetrieveAsync(request with { Query = v, TopK = candidateK }, cancellationToken))).ConfigureAwait(false);
 
         if (lists.Length == 0)

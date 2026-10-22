@@ -23,6 +23,10 @@ public sealed class PigmentorConfig
     [JsonPropertyName("reranker")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RerankerConfig? Reranker { get; set; } = new();
+
+    [JsonPropertyName("retrieval")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RetrievalConfig? Retrieval { get; set; } = new();
 }
 
 public sealed class ChatConfig
@@ -94,4 +98,22 @@ public sealed class RerankerConfig
     [JsonPropertyName("minScore")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public double? MinScore { get; set; }
+}
+
+public sealed class RetrievalConfig
+{
+    [JsonPropertyName("candidatePoolPerLeg")]
+    public int CandidatePoolPerLeg { get; set; } = 50;
+
+    [JsonPropertyName("rrfK")]
+    public int RrfK { get; set; } = 60;
+
+    [JsonPropertyName("denseWeight")]
+    public double DenseWeight { get; set; } = 1.0;
+
+    [JsonPropertyName("sparseWeight")]
+    public double SparseWeight { get; set; } = 1.0;
+
+    [JsonPropertyName("legTimeoutSeconds")]
+    public double LegTimeoutSeconds { get; set; } = 10.0;
 }

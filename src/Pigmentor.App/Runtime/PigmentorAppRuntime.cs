@@ -269,7 +269,15 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
         {
             var dense = sp.GetRequiredService<DenseRetriever>();
             var sparse = sp.GetRequiredService<SparseRetriever>();
-            return new HybridRetriever(dense, sparse);
+            var hybridOptions = new HybridRetrievalOptions
+            {
+                CandidatePoolPerLeg = config.Retrieval?.CandidatePoolPerLeg ?? 50,
+                RrfK = config.Retrieval?.RrfK ?? 60,
+                DenseWeight = config.Retrieval?.DenseWeight ?? 1.0,
+                SparseWeight = config.Retrieval?.SparseWeight ?? 1.0,
+                LegTimeout = TimeSpan.FromSeconds(config.Retrieval?.LegTimeoutSeconds ?? 10.0)
+            };
+            return new HybridRetriever(dense, sparse, hybridOptions);
         });
 
         // 6. Extraction, Chunker, and Ingestion setup

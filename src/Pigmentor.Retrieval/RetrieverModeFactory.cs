@@ -41,7 +41,8 @@ public static class RetrieverModeFactory
         string mode,
         IRetriever dense,
         IRetriever sparse,
-        RrfMerger? merger = null)
+        RrfMerger? merger = null,
+        HybridRetrievalOptions? options = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(mode);
         ArgumentNullException.ThrowIfNull(dense);
@@ -51,7 +52,7 @@ public static class RetrieverModeFactory
         {
             "dense" => dense,
             "sparse" => sparse,
-            "hybrid" => new HybridRetriever(dense, sparse, merger),
+            "hybrid" => new HybridRetriever(dense, sparse, options, merger),
             _ => throw new ArgumentException(
                 $"Unknown retriever mode '{mode}'. Supported modes: {string.Join(", ", SupportedModes)}.",
                 nameof(mode)),

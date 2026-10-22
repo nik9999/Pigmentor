@@ -14,11 +14,16 @@ public sealed class HybridRetriever : IRetriever
 {
     private readonly IRetriever _dense;
     private readonly IRetriever _sparse;
+    private readonly HybridRetrievalOptions _options;
     private readonly RrfMerger _merger;
+
+    /// <summary>Configured hybrid retrieval options.</summary>
+    public HybridRetrievalOptions Options => _options;
 
     public HybridRetriever(
         IRetriever dense,
         IRetriever sparse,
+        HybridRetrievalOptions? options = null,
         RrfMerger? merger = null,
         double? denseMinScore = null,
         double? sparseMinScore = null)
@@ -31,7 +36,18 @@ public sealed class HybridRetriever : IRetriever
         _sparse = (sparseMinScore.HasValue && sparseMinScore.Value > 0.0)
             ? new MinScoreFilter(sparse, sparseMinScore.Value)
             : sparse;
-        _merger = merger ?? new RrfMerger();
+        _options = options ?? new HybridRetrievalOptions();
+        _merger = merger ?? new RrfMerger(_options.RrfK);
+    }
+
+    public HybridRetriever(
+        IRetriever dense,
+        IRetriever sparse,
+        RrfMerger? merger,
+        double? denseMinScore = null,
+        double? sparseMinScore = null)
+        : this(dense, sparse, options: null, merger, denseMinScore, sparseMinScore)
+    {
     }
 
     public string Strategy => $"hybrid({_dense.Strategy}+{_sparse.Strategy})";
@@ -50,19 +66,46 @@ public sealed class HybridRetriever : IRetriever
         ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        // Fan out 2× topK candidates per leg; the merger picks the final topK.
-        var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
+        // Candidate pool per leg (default 50; scales up if request.TopK > pool size)
+        var candidateK = Math.Max(_options.CandidatePoolPerLeg, request.TopK);
         var effectiveFilter = ReferenceEquals(request.Filter, MetadataFilter.All)
             ? null
             : (request.Filter ?? QueryScopeResolver.ResolveScope(request.Query));
         var legRequest = request with { TopK = candidateK, Filter = effectiveFilter };
-        var denseTask = _dense.RetrieveAsync(legRequest, cancellationToken);
-        var sparseTask = _sparse.RetrieveAsync(legRequest, cancellationToken);
 
-        // WaitAsync ensures the await unblocks promptly on cancellation even if
-        // one inner retriever has a bug that doesn't cooperate with the token.
-        await Task.WhenAll(denseTask, sparseTask).WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var legCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (_options.LegTimeout > TimeSpan.Zero && _options.LegTimeout != Timeout.InfiniteTimeSpan)
+        {
+            legCts.CancelAfter(_options.LegTimeout);
+        }
+        var legToken = legCts.Token;
 
-        return _merger.Merge(denseTask.Result, sparseTask.Result, request.TopK);
+        var denseTask = _dense.RetrieveAsync(legRequest, legToken);
+        var sparseTask = _sparse.RetrieveAsync(legRequest, legToken);
+
+        try
+        {
+            await Task.WhenAll(denseTask, sparseTask).WaitAsync(legToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && legCts.IsCancellationRequested)
+        {
+            // Leg timeout occurred. If one leg completed successfully, salvage its results.
+            if (denseTask.IsCompletedSuccessfully && !sparseTask.IsCompletedSuccessfully)
+            {
+                return denseTask.Result.Take(request.TopK).ToList();
+            }
+            if (sparseTask.IsCompletedSuccessfully && !denseTask.IsCompletedSuccessfully)
+            {
+                return sparseTask.Result.Take(request.TopK).ToList();
+            }
+            throw new TimeoutException($"Hybrid retrieval legs timed out after {_options.LegTimeout.TotalSeconds:F1} seconds.");
+        }
+
+        return _merger.Merge(
+            denseTask.Result,
+            _options.DenseWeight,
+            sparseTask.Result,
+            _options.SparseWeight,
+            request.TopK);
     }
 }

@@ -28,11 +28,19 @@ public sealed class RrfMerger
     public IReadOnlyList<RetrievalResult> Merge(
         IReadOnlyList<RetrievalResult> a,
         IReadOnlyList<RetrievalResult> b,
+        int topK) => Merge(a, 1.0, b, 1.0, topK);
+
+    /// <summary>Fuse two result lists by reciprocal rank with per-leg weights.</summary>
+    public IReadOnlyList<RetrievalResult> Merge(
+        IReadOnlyList<RetrievalResult> a,
+        double weightA,
+        IReadOnlyList<RetrievalResult> b,
+        double weightB,
         int topK)
     {
         ArgumentNullException.ThrowIfNull(a);
         ArgumentNullException.ThrowIfNull(b);
-        return Merge([a, b], topK);
+        return Merge([(a, weightA), (b, weightB)], topK);
     }
 
     /// <summary>Fuse two or more result lists by reciprocal rank.</summary>
@@ -41,13 +49,22 @@ public sealed class RrfMerger
         int topK)
     {
         ArgumentNullException.ThrowIfNull(lists);
+        return Merge(lists.Select(l => (l, 1.0)), topK);
+    }
+
+    /// <summary>Fuse two or more result lists by weighted reciprocal rank.</summary>
+    public IReadOnlyList<RetrievalResult> Merge(
+        IEnumerable<(IReadOnlyList<RetrievalResult> List, double Weight)> weightedLists,
+        int topK)
+    {
+        ArgumentNullException.ThrowIfNull(weightedLists);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
 
-        var fused = new Dictionary<string, (DocumentChunk Chunk, double FusedScore, double MaxOriginalScore, double? DenseScore, double? SparseScore, ReadOnlyMemory<float>? Vector)>(StringComparer.Ordinal);
+        var fused = new Dictionary<string, (DocumentChunk Chunk, double FusedScore, double MaxOriginalScore, double? DenseScore, double? SparseScore, ReadOnlyMemory<float>? Vector, double? RerankerScore)>(StringComparer.Ordinal);
 
-        foreach (var list in lists)
+        foreach (var (list, weight) in weightedLists)
         {
-            if (list is null)
+            if (list is null || weight <= 0.0)
             {
                 continue;
             }
@@ -56,7 +73,7 @@ public sealed class RrfMerger
             {
                 var item = list[i];
                 var key = item.Chunk.ChunkId;
-                var contribution = 1.0 / (K + i + 1);
+                var contribution = weight * (1.0 / (K + i + 1));
                 if (fused.TryGetValue(key, out var existing))
                 {
                     var dense = existing.DenseScore;
@@ -77,12 +94,15 @@ public sealed class RrfMerger
 
                     var maxOrig = Math.Max(existing.MaxOriginalScore, item.Score);
                     var vector = existing.Vector ?? item.Vector;
+                    var reranker = existing.RerankerScore.HasValue
+                        ? (item.RerankerScore.HasValue ? Math.Max(existing.RerankerScore.Value, item.RerankerScore.Value) : existing.RerankerScore)
+                        : item.RerankerScore;
 
-                    fused[key] = (existing.Chunk, existing.FusedScore + contribution, maxOrig, dense, sparse, vector);
+                    fused[key] = (existing.Chunk, existing.FusedScore + contribution, maxOrig, dense, sparse, vector, reranker);
                 }
                 else
                 {
-                    fused[key] = (item.Chunk, contribution, item.Score, item.DenseScore, item.SparseScore, item.Vector);
+                    fused[key] = (item.Chunk, contribution, item.Score, item.DenseScore, item.SparseScore, item.Vector, item.RerankerScore);
                 }
             }
         }
@@ -97,7 +117,8 @@ public sealed class RrfMerger
                 FusedScore = x.FusedScore,
                 DenseScore = x.DenseScore,
                 SparseScore = x.SparseScore,
-                Vector = x.Vector
+                Vector = x.Vector,
+                RerankerScore = x.RerankerScore
             })];
     }
 }

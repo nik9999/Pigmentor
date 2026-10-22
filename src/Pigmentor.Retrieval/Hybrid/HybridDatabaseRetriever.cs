@@ -13,14 +13,20 @@ public sealed class HybridDatabaseRetriever : IRetriever
     private readonly IRetriever _vector;
     private readonly IRetriever _graph;
     private readonly FusionService _fusion;
+    private readonly int _candidatePoolPerLeg;
 
-    public HybridDatabaseRetriever(IRetriever vector, IRetriever graph, FusionService? fusion = null)
+    public HybridDatabaseRetriever(
+        IRetriever vector,
+        IRetriever graph,
+        FusionService? fusion = null,
+        int candidatePoolPerLeg = 50)
     {
         ArgumentNullException.ThrowIfNull(vector);
         ArgumentNullException.ThrowIfNull(graph);
         _vector = vector;
         _graph = graph;
         _fusion = fusion ?? new FusionService();
+        _candidatePoolPerLeg = candidatePoolPerLeg > 0 ? candidatePoolPerLeg : 50;
     }
 
     public string Strategy => $"hybrid-db({_vector.Strategy}+{_graph.Strategy}, {_fusion.Strategy})";
@@ -39,7 +45,7 @@ public sealed class HybridDatabaseRetriever : IRetriever
         ArgumentException.ThrowIfNullOrWhiteSpace(request.Query);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(request.TopK);
 
-        var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
+        var candidateK = Math.Max(_candidatePoolPerLeg, request.TopK);
         var legRequest = request with { TopK = candidateK };
         var vectorTask = _vector.RetrieveAsync(legRequest, cancellationToken);
         var graphTask = _graph.RetrieveAsync(legRequest, cancellationToken);
