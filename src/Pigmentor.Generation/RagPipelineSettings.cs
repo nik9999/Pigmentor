@@ -99,4 +99,34 @@ public sealed record RagPipelineSettings
             _retrievalPoolSize = value;
         }
     }
+
+    private bool _enableNearDuplicateSuppression = true;
+    private double _nearDuplicateSimilarityCeiling = 0.94;
+
+    /// <summary>
+    /// Whether to suppress cross-document near-duplicate chunks prior to context assembly.
+    /// Default is true.
+    /// </summary>
+    public bool EnableNearDuplicateSuppression
+    {
+        get => _enableNearDuplicateSuppression;
+        set => _enableNearDuplicateSuppression = value;
+    }
+
+    /// <summary>
+    /// Cosine similarity threshold above which chunks from distinct documents are considered near-duplicates.
+    /// Must be in (0, 1]. Default is 0.94.
+    /// </summary>
+    public double NearDuplicateSimilarityCeiling
+    {
+        get => _nearDuplicateSimilarityCeiling;
+        set
+        {
+            if (value is <= 0.0 or > 1.0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "NearDuplicateSimilarityCeiling must be in (0, 1].");
+            }
+            _nearDuplicateSimilarityCeiling = value;
+        }
+    }
 }

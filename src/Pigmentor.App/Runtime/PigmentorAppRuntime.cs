@@ -97,7 +97,9 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
                     rerankerTokenizerPath,
                     maxPairsPerBatch: config.Reranker.MaxPairsPerBatch > 0 ? config.Reranker.MaxPairsPerBatch : 16,
                     maxSequenceLength: config.Reranker.MaxSequenceLength > 0 ? config.Reranker.MaxSequenceLength : 512,
-                    applySigmoid: true);
+                    applySigmoid: true,
+                    enableNearDuplicateSuppression: config.Retrieval?.EnableNearDuplicateSuppression ?? true,
+                    nearDuplicateSimilarityCeiling: config.Retrieval?.NearDuplicateSimilarityCeiling ?? NearDuplicateDeduplicator.DefaultSimilarityCeiling);
             }));
         }
         else
@@ -109,6 +111,8 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
         {
             options.Budget = new ContextBudget(MaxTotalTokens: 8192, ReservedOutputTokens: 1024);
             options.DefaultTopK = 8;
+            options.EnableNearDuplicateSuppression = config.Retrieval?.EnableNearDuplicateSuppression ?? true;
+            options.NearDuplicateSimilarityCeiling = config.Retrieval?.NearDuplicateSimilarityCeiling ?? NearDuplicateDeduplicator.DefaultSimilarityCeiling;
             if (config.Reranker?.Enabled == true)
             {
                 options.RetrievalPoolSize = Math.Max(50, options.DefaultTopK * 4);

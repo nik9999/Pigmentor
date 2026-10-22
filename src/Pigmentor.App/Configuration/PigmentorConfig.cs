@@ -116,4 +116,10 @@ public sealed class RetrievalConfig
 
     [JsonPropertyName("legTimeoutSeconds")]
     public double LegTimeoutSeconds { get; set; } = 10.0;
+
+    [JsonPropertyName("enableNearDuplicateSuppression")]
+    public bool EnableNearDuplicateSuppression { get; set; } = true;
+
+    [JsonPropertyName("nearDuplicateSimilarityCeiling")]
+    public double NearDuplicateSimilarityCeiling { get; set; } = 0.94;
 }

@@ -84,7 +84,9 @@ public sealed class PigmentorConfigManager
         "rrfk",
         "denseweight",
         "sparseweight",
-        "legtimeoutseconds"
+        "legtimeoutseconds",
+        "enablenearduplicatesuppression",
+        "nearduplicatesimilarityceiling"
     };
 
     private readonly IPigmentorAppPaths _paths;
@@ -406,6 +408,22 @@ public sealed class PigmentorConfigManager
                 config.Retrieval ??= new RetrievalConfig();
                 config.Retrieval.LegTimeoutSeconds = timeoutSec;
                 break;
+            case "retrieval.enablenearduplicatesuppression":
+                if (!bool.TryParse(value, out var enableDup))
+                {
+                    throw new ArgumentException("retrieval.enablenearduplicatesuppression must be a boolean (true/false).", nameof(value));
+                }
+                config.Retrieval ??= new RetrievalConfig();
+                config.Retrieval.EnableNearDuplicateSuppression = enableDup;
+                break;
+            case "retrieval.nearduplicatesimilarityceiling":
+                if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ceiling) || ceiling <= 0.0 || ceiling > 1.0)
+                {
+                    throw new ArgumentException("retrieval.nearduplicatesimilarityceiling must be a number in (0, 1].", nameof(value));
+                }
+                config.Retrieval ??= new RetrievalConfig();
+                config.Retrieval.NearDuplicateSimilarityCeiling = ceiling;
+                break;
 
             default:
                 throw new ArgumentException($"Unknown configuration setting: '{key}'.", nameof(key));
@@ -629,6 +647,10 @@ public sealed class PigmentorConfigManager
             if (config.Retrieval.LegTimeoutSeconds <= 0.0)
             {
                 errors.Add("Retrieval legTimeoutSeconds must be positive.");
+            }
+            if (config.Retrieval.NearDuplicateSimilarityCeiling <= 0.0 || config.Retrieval.NearDuplicateSimilarityCeiling > 1.0)
+            {
+                errors.Add("Retrieval nearDuplicateSimilarityCeiling must be in (0, 1].");
             }
         }
 

@@ -2,6 +2,7 @@ using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Pigmentor.Retrieval;
 
 namespace Pigmentor.App.Runtime;
 
@@ -23,6 +24,8 @@ public sealed class OnnxCrossEncoderReranker : IReranker, IDisposable
     private readonly int _maxPairsPerBatch;
     private readonly int _maxSequenceLength;
     private readonly bool _applySigmoid;
+    private readonly bool _enableNearDuplicateSuppression;
+    private readonly double _nearDuplicateSimilarityCeiling;
     private bool _disposed;
 
     /// <summary>Maximum number of (query, passage) pairs processed in a single ONNX inference batch.</summary>
@@ -34,6 +37,12 @@ public sealed class OnnxCrossEncoderReranker : IReranker, IDisposable
     /// <summary>Whether scores are calibrated into [0, 1] using a numerically stable sigmoid.</summary>
     public bool ApplySigmoid => _applySigmoid;
 
+    /// <summary>Whether cross-document near-duplicate suppression is applied before selecting top-K.</summary>
+    public bool EnableNearDuplicateSuppression => _enableNearDuplicateSuppression;
+
+    /// <summary>Cosine similarity threshold for cross-document near-duplicate chunk suppression.</summary>
+    public double NearDuplicateSimilarityCeiling => _nearDuplicateSimilarityCeiling;
+
     /// <summary>
     /// Initializes an <see cref="OnnxCrossEncoderReranker"/> using an existing <see cref="InferenceSession"/> and <see cref="IOnnxTokenizer"/>.
     /// </summary>
@@ -44,7 +53,9 @@ public sealed class OnnxCrossEncoderReranker : IReranker, IDisposable
         int maxSequenceLength = 512,
         bool applySigmoid = true,
         bool disposeSession = false,
-        bool disposeTokenizer = false)
+        bool disposeTokenizer = false,
+        bool enableNearDuplicateSuppression = true,
+        double nearDuplicateSimilarityCeiling = NearDuplicateDeduplicator.DefaultSimilarityCeiling)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _tokenizer = tokenizer ?? throw new ArgumentNullException(nameof(tokenizer));
@@ -53,6 +64,8 @@ public sealed class OnnxCrossEncoderReranker : IReranker, IDisposable
         _maxPairsPerBatch = maxPairsPerBatch > 0 ? maxPairsPerBatch : 16;
         _maxSequenceLength = maxSequenceLength > 0 ? maxSequenceLength : 512;
         _applySigmoid = applySigmoid;
+        _enableNearDuplicateSuppression = enableNearDuplicateSuppression;
+        _nearDuplicateSimilarityCeiling = nearDuplicateSimilarityCeiling;
     }
 
     /// <summary>
@@ -63,7 +76,9 @@ public sealed class OnnxCrossEncoderReranker : IReranker, IDisposable
         string? tokenizerPath = null,
         int maxPairsPerBatch = 16,
         int maxSequenceLength = 512,
-        bool applySigmoid = true)
+        bool applySigmoid = true,
+        bool enableNearDuplicateSuppression = true,
+        double nearDuplicateSimilarityCeiling = NearDuplicateDeduplicator.DefaultSimilarityCeiling)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelPath);
 
@@ -93,6 +108,8 @@ public sealed class OnnxCrossEncoderReranker : IReranker, IDisposable
         _maxPairsPerBatch = maxPairsPerBatch > 0 ? maxPairsPerBatch : 16;
         _maxSequenceLength = maxSequenceLength > 0 ? maxSequenceLength : 512;
         _applySigmoid = applySigmoid;
+        _enableNearDuplicateSuppression = enableNearDuplicateSuppression;
+        _nearDuplicateSimilarityCeiling = nearDuplicateSimilarityCeiling;
     }
 
     /// <inheritdoc />
@@ -121,7 +138,7 @@ public sealed class OnnxCrossEncoderReranker : IReranker, IDisposable
         var passageTexts = candidates.Select(c => c.Chunk.Text).ToList();
         var scores = await ScorePairsBatchedAsync(query, passageTexts, cancellationToken).ConfigureAwait(false);
 
-        return candidates
+        var scored = candidates
             .Select((c, i) => c with
             {
                 Score = scores[i],
@@ -129,8 +146,13 @@ public sealed class OnnxCrossEncoderReranker : IReranker, IDisposable
             })
             .OrderByDescending(c => c.Score)
             .ThenBy(c => c.Chunk.ChunkId, StringComparer.Ordinal)
-            .Take(topK)
             .ToList();
+
+        var deduplicated = _enableNearDuplicateSuppression
+            ? NearDuplicateDeduplicator.DeduplicateNearDuplicates(scored, _nearDuplicateSimilarityCeiling)
+            : scored;
+
+        return deduplicated.Take(topK).ToList();
     }
 
     /// <summary>

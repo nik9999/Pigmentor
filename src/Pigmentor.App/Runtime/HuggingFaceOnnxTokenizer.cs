@@ -9,6 +9,7 @@ namespace Pigmentor.App.Runtime;
 public sealed class HuggingFaceOnnxTokenizer : IOnnxTokenizer
 {
     private readonly Tokenizer _tokenizer;
+    private readonly object _lock = new();
     private bool _disposed;
 
     public HuggingFaceOnnxTokenizer(string tokenizerPath)
@@ -37,9 +38,13 @@ public sealed class HuggingFaceOnnxTokenizer : IOnnxTokenizer
 
     public long[] Tokenize(string text)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        uint[] rawTokens;
+        lock (_lock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            rawTokens = _tokenizer.Encode(text ?? string.Empty);
+        }
 
-        var rawTokens = _tokenizer.Encode(text ?? string.Empty);
         var result = new long[rawTokens.Length];
         for (var i = 0; i < rawTokens.Length; i++)
         {
@@ -51,13 +56,16 @@ public sealed class HuggingFaceOnnxTokenizer : IOnnxTokenizer
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_lock)
         {
-            return;
-        }
+            if (_disposed)
+            {
+                return;
+            }
 
-        _tokenizer.Dispose();
-        _disposed = true;
+            _tokenizer.Dispose();
+            _disposed = true;
+        }
     }
 }
 

@@ -426,6 +426,13 @@ public sealed class RagPipeline : IRagPipeline
                 .ToList();
         }
 
+        if (_settings.EnableNearDuplicateSuppression)
+        {
+            filteredCandidates = NearDuplicateDeduplicator.DeduplicateNearDuplicates(
+                filteredCandidates,
+                _settings.NearDuplicateSimilarityCeiling);
+        }
+
         // 3. Reranker receives candidates that satisfied mandatory filtering and ranks topK
         var rawRerankedCandidates = await _reranker.RerankAsync(
             request.Question,
@@ -439,6 +446,13 @@ public sealed class RagPipeline : IRagPipeline
                 .Where(c => !c.RerankerScore.HasValue || c.RerankerScore.Value >= _settings.MinRerankerScore)
                 .ToList()
             : rawRerankedCandidates;
+
+        if (_settings.EnableNearDuplicateSuppression)
+        {
+            rerankedCandidates = NearDuplicateDeduplicator.DeduplicateNearDuplicates(
+                rerankedCandidates,
+                _settings.NearDuplicateSimilarityCeiling);
+        }
 
         // 4. Context builder enforces token budget, accounting for prompt instructions, delimiters, and question overhead (§3, §4, §5)
         var basePrompt = RagPromptBuilder.BuildPrompt(request.Question, RagContext.Empty);
