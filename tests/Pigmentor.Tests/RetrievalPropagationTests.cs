@@ -202,6 +202,45 @@ public class RetrievalPropagationTests
     }
 
     [Fact]
+    public void RrfMerger_TieBreaksByMaxOriginalScore()
+    {
+        var meta = CreateMeta("doc1", "HR");
+        var chunkLow = new DocumentChunk("doc1#low", "doc1", 0, "Low", 0, 3, meta);
+        var chunkHigh = new DocumentChunk("doc1#high", "doc1", 1, "High", 0, 4, meta);
+
+        // Both are at rank 0 in their respective disjoint lists, so their RRF contribution is identical: 1 / (60 + 0 + 1)
+        var list1 = new List<RetrievalResult> { new(chunkLow, 0.70) };
+        var list2 = new List<RetrievalResult> { new(chunkHigh, 0.95) };
+
+        var merger = new RrfMerger(k: 60);
+        var fused = merger.Merge([list1, list2], topK: 2);
+
+        Assert.Equal(2, fused.Count);
+        Assert.Equal(fused[0].Score, fused[1].Score); // Tied RRF score
+        Assert.Equal("doc1#high", fused[0].Chunk.ChunkId); // Won tie-break by MaxOriginalScore (0.95 vs 0.70)
+        Assert.Equal("doc1#low", fused[1].Chunk.ChunkId);
+    }
+
+    [Fact]
+    public void RrfMerger_TieBreaksByChunkId_WhenMaxOriginalScoreTies()
+    {
+        var meta = CreateMeta("doc1", "HR");
+        var chunkZ = new DocumentChunk("chunk-z", "doc1", 0, "Z", 0, 1, meta);
+        var chunkA = new DocumentChunk("chunk-a", "doc1", 1, "A", 0, 1, meta);
+
+        // Identical RRF rank (rank 0) and identical original score (0.80)
+        var list1 = new List<RetrievalResult> { new(chunkZ, 0.80) };
+        var list2 = new List<RetrievalResult> { new(chunkA, 0.80) };
+
+        var merger = new RrfMerger(k: 60);
+        var fused = merger.Merge([list1, list2], topK: 2);
+
+        Assert.Equal(2, fused.Count);
+        Assert.Equal("chunk-a", fused[0].Chunk.ChunkId); // Won tie-break by ChunkId Ordinal
+        Assert.Equal("chunk-z", fused[1].Chunk.ChunkId);
+    }
+
+    [Fact]
     public async Task MinScoreFilter_UsesDenseScore_WhenEvaluatedOnFusedResults()
     {
         var meta = CreateMeta("doc1", "HR");

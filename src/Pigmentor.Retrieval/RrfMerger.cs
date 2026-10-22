@@ -21,11 +21,9 @@ public sealed class RrfMerger
 
     /// <summary>Fuse two result lists by reciprocal rank.</summary>
     /// <remarks>
-    /// Only the fused RRF score decides the order — the inputs' original
-    /// similarity scores are not carried into the comparison, so equal fused
-    /// scores fall back to encounter order (first list first). An earlier
-    /// version of this comment promised a tie-break on the original score,
-    /// which the implementation has never done.
+    /// The fused RRF score decides the primary order. Equal fused scores tie-break
+    /// deterministically on the maximum original leg score, followed by chunk ID
+    /// (<see cref="StringComparer.Ordinal"/>).
     /// </remarks>
     public IReadOnlyList<RetrievalResult> Merge(
         IReadOnlyList<RetrievalResult> a,
@@ -45,7 +43,7 @@ public sealed class RrfMerger
         ArgumentNullException.ThrowIfNull(lists);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
 
-        var fused = new Dictionary<string, (DocumentChunk Chunk, double FusedScore, double? DenseScore, double? SparseScore)>(StringComparer.Ordinal);
+        var fused = new Dictionary<string, (DocumentChunk Chunk, double FusedScore, double MaxOriginalScore, double? DenseScore, double? SparseScore)>(StringComparer.Ordinal);
 
         foreach (var list in lists)
         {
@@ -77,17 +75,21 @@ public sealed class RrfMerger
                             : item.SparseScore;
                     }
 
-                    fused[key] = (existing.Chunk, existing.FusedScore + contribution, dense, sparse);
+                    var maxOrig = Math.Max(existing.MaxOriginalScore, item.Score);
+
+                    fused[key] = (existing.Chunk, existing.FusedScore + contribution, maxOrig, dense, sparse);
                 }
                 else
                 {
-                    fused[key] = (item.Chunk, contribution, item.DenseScore, item.SparseScore);
+                    fused[key] = (item.Chunk, contribution, item.Score, item.DenseScore, item.SparseScore);
                 }
             }
         }
 
         return [.. fused.Values
             .OrderByDescending(x => x.FusedScore)
+            .ThenByDescending(x => x.MaxOriginalScore)
+            .ThenBy(x => x.Chunk.ChunkId, StringComparer.Ordinal)
             .Take(topK)
             .Select(x => new RetrievalResult(x.Chunk, x.FusedScore)
             {

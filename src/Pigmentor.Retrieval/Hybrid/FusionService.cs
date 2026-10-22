@@ -91,6 +91,7 @@ public sealed class FusionService
         }
         return [.. fused.Values
             .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Chunk.ChunkId, StringComparer.Ordinal)
             .Take(topK)
             .Select(x => new RetrievalResult(x.Chunk, x.Score)
             {

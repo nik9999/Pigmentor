@@ -613,11 +613,11 @@ public sealed class RagPipelineTests
 
         Assert.Equal(4, primaryCount);
         Assert.Equal(4, entityCount);
-        // Verify RRF alternating order: P0, E0, P1, E1, P2, E2, P3, E3
-        Assert.Equal("primary#0", merged[0].Chunk.ChunkId);
-        Assert.Equal("entity#0", merged[1].Chunk.ChunkId);
-        Assert.Equal("primary#1", merged[2].Chunk.ChunkId);
-        Assert.Equal("entity#1", merged[3].Chunk.ChunkId);
+        // Verify RRF alternating order: E0, P0, E1, P1, E2, P2, E3, P3 (deterministic tie-break by ChunkId)
+        Assert.Equal("entity#0", merged[0].Chunk.ChunkId);
+        Assert.Equal("primary#0", merged[1].Chunk.ChunkId);
+        Assert.Equal("entity#1", merged[2].Chunk.ChunkId);
+        Assert.Equal("primary#1", merged[3].Chunk.ChunkId);
     }
 
     [Fact]
