@@ -57,28 +57,47 @@ public sealed class FusionService
         IReadOnlyList<RetrievalResult> b,
         int topK)
     {
-        var normA = NormalizeScores(a);
-        var normB = NormalizeScores(b);
-        var fused = new Dictionary<string, (DocumentChunk Chunk, double Score)>(StringComparer.Ordinal);
-        foreach (var (chunk, score) in normA)
+        var normA = NormalizeScores(a).ToList();
+        var normB = NormalizeScores(b).ToList();
+        var fused = new Dictionary<string, (DocumentChunk Chunk, double Score, double? DenseScore, double? SparseScore)>(StringComparer.Ordinal);
+        for (int i = 0; i < normA.Count; i++)
         {
-            fused[chunk.ChunkId] = (chunk, WeightA * score);
+            var (chunk, score) = normA[i];
+            var orig = a[i];
+            fused[chunk.ChunkId] = (chunk, WeightA * score, orig.DenseScore, orig.SparseScore);
         }
-        foreach (var (chunk, score) in normB)
+        for (int i = 0; i < normB.Count; i++)
         {
+            var (chunk, score) = normB[i];
+            var orig = b[i];
             if (fused.TryGetValue(chunk.ChunkId, out var existing))
             {
-                fused[chunk.ChunkId] = (existing.Chunk, existing.Score + WeightB * score);
+                var dense = existing.DenseScore;
+                if (orig.DenseScore.HasValue)
+                {
+                    dense = existing.DenseScore.HasValue ? Math.Max(existing.DenseScore.Value, orig.DenseScore.Value) : orig.DenseScore;
+                }
+                var sparse = existing.SparseScore;
+                if (orig.SparseScore.HasValue)
+                {
+                    sparse = existing.SparseScore.HasValue ? Math.Max(existing.SparseScore.Value, orig.SparseScore.Value) : orig.SparseScore;
+                }
+                fused[chunk.ChunkId] = (existing.Chunk, existing.Score + WeightB * score, dense, sparse);
             }
             else
             {
-                fused[chunk.ChunkId] = (chunk, WeightB * score);
+                fused[chunk.ChunkId] = (chunk, WeightB * score, orig.DenseScore, orig.SparseScore);
             }
         }
         return [.. fused.Values
             .OrderByDescending(x => x.Score)
             .Take(topK)
-            .Select(x => new RetrievalResult(x.Chunk, x.Score))];
+            .Select(x => new RetrievalResult(x.Chunk, x.Score)
+            {
+                FusedScore = x.Score,
+                DenseScore = x.DenseScore,
+                SparseScore = x.SparseScore
+            })];
     }
 
     private IReadOnlyList<RetrievalResult> Cascade(

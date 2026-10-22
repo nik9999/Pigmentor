@@ -1,5 +1,6 @@
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Pigmentor.Core.Filtering;
 
 namespace Pigmentor.Retrieval;
 
@@ -15,12 +16,21 @@ public sealed class HybridRetriever : IRetriever
     private readonly IRetriever _sparse;
     private readonly RrfMerger _merger;
 
-    public HybridRetriever(IRetriever dense, IRetriever sparse, RrfMerger? merger = null)
+    public HybridRetriever(
+        IRetriever dense,
+        IRetriever sparse,
+        RrfMerger? merger = null,
+        double? denseMinScore = null,
+        double? sparseMinScore = null)
     {
         ArgumentNullException.ThrowIfNull(dense);
         ArgumentNullException.ThrowIfNull(sparse);
-        _dense = dense;
-        _sparse = sparse;
+        _dense = (denseMinScore.HasValue && denseMinScore.Value > 0.0)
+            ? new MinScoreFilter(dense, denseMinScore.Value)
+            : dense;
+        _sparse = (sparseMinScore.HasValue && sparseMinScore.Value > 0.0)
+            ? new MinScoreFilter(sparse, sparseMinScore.Value)
+            : sparse;
         _merger = merger ?? new RrfMerger();
     }
 
@@ -42,7 +52,9 @@ public sealed class HybridRetriever : IRetriever
 
         // Fan out 2× topK candidates per leg; the merger picks the final topK.
         var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
-        var effectiveFilter = request.Filter ?? QueryScopeResolver.ResolveScope(request.Query);
+        var effectiveFilter = ReferenceEquals(request.Filter, MetadataFilter.All)
+            ? null
+            : (request.Filter ?? QueryScopeResolver.ResolveScope(request.Query));
         var legRequest = request with { TopK = candidateK, Filter = effectiveFilter };
         var denseTask = _dense.RetrieveAsync(legRequest, cancellationToken);
         var sparseTask = _sparse.RetrieveAsync(legRequest, cancellationToken);

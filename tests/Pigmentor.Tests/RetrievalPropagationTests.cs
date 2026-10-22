@@ -167,6 +167,89 @@ public class RetrievalPropagationTests
     }
 
     [Fact]
+    public void RrfMerger_PreservesDenseAndSparseScores_AcrossLegs()
+    {
+        var meta = CreateMeta("doc1", "HR");
+        var chunk1 = new DocumentChunk("doc1#1", "doc1", 0, "Chunk 1", 0, 7, meta);
+        var chunk2 = new DocumentChunk("doc1#2", "doc1", 1, "Chunk 2", 0, 7, meta);
+
+        var denseList = new List<RetrievalResult>
+        {
+            new RetrievalResult(chunk1, 0.85) { DenseScore = 0.85 },
+            new RetrievalResult(chunk2, 0.40) { DenseScore = 0.40 }
+        };
+
+        var sparseList = new List<RetrievalResult>
+        {
+            new RetrievalResult(chunk1, 15.2) { SparseScore = 15.2 }
+        };
+
+        var merger = new RrfMerger(k: 60);
+        var fused = merger.Merge([denseList, sparseList], topK: 5);
+
+        Assert.Equal(2, fused.Count);
+        var top = fused[0];
+        Assert.Equal("doc1#1", top.Chunk.ChunkId);
+        Assert.Equal(0.85, top.DenseScore);
+        Assert.Equal(15.2, top.SparseScore);
+        Assert.True(top.Score < 0.1); // RRF rank score
+        Assert.Equal(top.Score, top.FusedScore);
+
+        var second = fused[1];
+        Assert.Equal("doc1#2", second.Chunk.ChunkId);
+        Assert.Equal(0.40, second.DenseScore);
+        Assert.Null(second.SparseScore);
+    }
+
+    [Fact]
+    public async Task MinScoreFilter_UsesDenseScore_WhenEvaluatedOnFusedResults()
+    {
+        var meta = CreateMeta("doc1", "HR");
+        var chunkRelevant = new DocumentChunk("doc1#1", "doc1", 0, "Relevant", 0, 8, meta);
+        var chunkIrrelevant = new DocumentChunk("doc1#2", "doc1", 1, "Irrelevant", 0, 10, meta);
+
+        // Fused results where Score is RRF (~0.03), but DenseScore reflects true cosine similarity
+        var fusedResults = new List<RetrievalResult>
+        {
+            new RetrievalResult(chunkRelevant, 0.032) { FusedScore = 0.032, DenseScore = 0.82 },
+            new RetrievalResult(chunkIrrelevant, 0.016) { FusedScore = 0.016, DenseScore = 0.25 }
+        };
+
+        var inner = new RecordingRetriever("fused", fusedResults);
+        var filter = new MinScoreFilter(inner, minScore: 0.50);
+
+        var filtered = await filter.RetrieveAsync("test", 5);
+
+        // Fused rank score (0.032) is < 0.50, but DenseScore (0.82) is >= 0.50, so chunkRelevant survives!
+        Assert.Single(filtered);
+        Assert.Equal("doc1#1", filtered[0].Chunk.ChunkId);
+        Assert.Equal(0.82, filtered[0].DenseScore);
+    }
+
+    [Fact]
+    public async Task HybridRetriever_SupportsPerLegMinScore_BeforeFusion()
+    {
+        var meta = CreateMeta("doc1", "HR");
+        var chunkGood = new DocumentChunk("doc1#1", "doc1", 0, "Good", 0, 4, meta);
+        var chunkBad = new DocumentChunk("doc1#2", "doc1", 1, "Bad", 0, 3, meta);
+
+        var denseRecorder = new RecordingRetriever("dense", [
+            new RetrievalResult(chunkGood, 0.75) { DenseScore = 0.75 },
+            new RetrievalResult(chunkBad, 0.30) { DenseScore = 0.30 }
+        ]);
+        var sparseRecorder = new RecordingRetriever("sparse", [
+            new RetrievalResult(chunkGood, 12.0) { SparseScore = 12.0 }
+        ]);
+
+        var hybrid = new HybridRetriever(denseRecorder, sparseRecorder, denseMinScore: 0.50);
+        var results = await hybrid.RetrieveAsync("test", 5);
+
+        Assert.Single(results);
+        Assert.Equal("doc1#1", results[0].Chunk.ChunkId);
+        Assert.Equal(0.75, results[0].DenseScore);
+    }
+
+    [Fact]
     public async Task HydeRetriever_PropagatesMetadataFilter_WithRewrittenQuery()
     {
         var chat = new SimpleChatClient("Hypothetical document content about vectors");

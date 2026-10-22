@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
+using Pigmentor.Core.Filtering;
 using Pigmentor.Core.Tokens;
 using Pigmentor.Retrieval;
 
@@ -159,6 +160,12 @@ public sealed class RagPipeline : IRagPipeline
     {
         var prep = await PrepareExecutionAsync(request, cancellationToken).ConfigureAwait(false);
 
+        if (_settings.MinDenseScore > 0.0 && prep.RagContext.Sources.Count == 0)
+        {
+            prep.Stopwatch.Stop();
+            return FinalizeResponse("В предоставленном контексте недостаточно информации для ответа на данный вопрос.", prep, TimeSpan.Zero);
+        }
+
         if (TableQueryExecutor.TryExecute(request.Question, prep.RagContext, out var deterministicAnswer))
         {
             prep.Stopwatch.Stop();
@@ -295,6 +302,15 @@ public sealed class RagPipeline : IRagPipeline
     {
         var prep = await PrepareExecutionAsync(request, cancellationToken).ConfigureAwait(false);
 
+        if (_settings.MinDenseScore > 0.0 && prep.RagContext.Sources.Count == 0)
+        {
+            prep.Stopwatch.Stop();
+            var abstentionResponse = FinalizeResponse("В предоставленном контексте недостаточно информации для ответа на данный вопрос.", prep, TimeSpan.Zero);
+            yield return new RagTextDelta(abstentionResponse.Answer);
+            yield return new RagCompleted(abstentionResponse);
+            yield break;
+        }
+
         if (TableQueryExecutor.TryExecute(request.Question, prep.RagContext, out var deterministicAnswer))
         {
             prep.Stopwatch.Stop();
@@ -365,7 +381,7 @@ public sealed class RagPipeline : IRagPipeline
         // remove the inferred filter and repeat retrieval across the full corpus to avoid false-positive silo lock-in.
         if (request.MetadataFilter is null && inferredFilter is not null && candidatePool.Count < Math.Max(1, topK / 2))
         {
-            var fallbackPool = await _retriever.RetrieveAsync(new RetrievalRequest(request.Question, topK, null), cancellationToken).ConfigureAwait(false);
+            var fallbackPool = await _retriever.RetrieveAsync(new RetrievalRequest(request.Question, topK, MetadataFilter.All), cancellationToken).ConfigureAwait(false);
             if (fallbackPool.Count > candidatePool.Count)
             {
                 candidatePool = fallbackPool;
@@ -401,6 +417,13 @@ public sealed class RagPipeline : IRagPipeline
         IReadOnlyList<RetrievalResult> filteredCandidates = effectiveFilter is not null
             ? candidatePool.Where(s => effectiveFilter.Matches(s.Chunk.Metadata)).ToList()
             : candidatePool;
+
+        if (_settings.MinDenseScore > 0.0)
+        {
+            filteredCandidates = filteredCandidates
+                .Where(c => !c.DenseScore.HasValue || c.DenseScore.Value >= _settings.MinDenseScore)
+                .ToList();
+        }
 
         // 3. Reranker receives candidates that satisfied mandatory filtering
         var rerankedCandidates = await _reranker.RerankAsync(
@@ -507,6 +530,29 @@ public sealed class RagPipeline : IRagPipeline
         PreparedExecution prep,
         TimeSpan generationLatency)
     {
+        double? maxDense = null;
+        double? maxSparse = null;
+        double? maxFused = null;
+        var candidatesToInspect = prep.CandidatePool.Count > 0 ? prep.CandidatePool : prep.FilteredCandidates;
+        if (candidatesToInspect.Count > 0)
+        {
+            foreach (var c in candidatesToInspect)
+            {
+                if (c.DenseScore.HasValue && (!maxDense.HasValue || c.DenseScore.Value > maxDense.Value))
+                {
+                    maxDense = c.DenseScore.Value;
+                }
+                if (c.SparseScore.HasValue && (!maxSparse.HasValue || c.SparseScore.Value > maxSparse.Value))
+                {
+                    maxSparse = c.SparseScore.Value;
+                }
+                if (!maxFused.HasValue || c.FusedScore > maxFused.Value)
+                {
+                    maxFused = c.FusedScore;
+                }
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(rawAnswer) && ContainsInternalDelimiters(rawAnswer))
         {
             var leakDiag = new RagDiagnostics(
@@ -522,7 +568,10 @@ public sealed class RagPipeline : IRagPipeline
                 RetrievalLatency: prep.RetrievalLatency,
                 GenerationLatency: generationLatency,
                 RequiredCitationsSatisfied: false,
-                HasInternalMarkerLeakage: true);
+                HasInternalMarkerLeakage: true,
+                MaxDenseScore: maxDense,
+                MaxSparseScore: maxSparse,
+                MaxFusedScore: maxFused);
 
             return new RagResponse(
                 "Ответ отклонен: обнаружена утечка внутренних служебных маркеров контекста.",
@@ -584,7 +633,10 @@ public sealed class RagPipeline : IRagPipeline
             RetrievalLatency: prep.RetrievalLatency,
             GenerationLatency: generationLatency,
             RequiredCitationsSatisfied: requiredCitationsSatisfied,
-            HasInternalMarkerLeakage: false);
+            HasInternalMarkerLeakage: false,
+            MaxDenseScore: maxDense,
+            MaxSparseScore: maxSparse,
+            MaxFusedScore: maxFused);
 
         return new RagResponse(answer, citations, prep.RagContext.Sources, diagnostics);
     }

@@ -53,4 +53,17 @@ public sealed record RagPipelineSettings
             ? new HashSet<string>(value, StringComparer.OrdinalIgnoreCase)
             : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
+
+    private double _minDenseScore;
+
+    /// <summary>
+    /// Minimum dense similarity threshold for candidate admission and abstention calibration.
+    /// Default is 0.0 (pass-through / disabled).
+    /// When positive (e.g. 0.35), candidates with DenseScore below this threshold are pruned.
+    /// </summary>
+    public double MinDenseScore
+    {
+        get => _minDenseScore;
+        set => _minDenseScore = value;
+    }
 }

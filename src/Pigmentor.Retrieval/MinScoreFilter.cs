@@ -5,18 +5,16 @@ namespace Pigmentor.Retrieval;
 
 /// <summary>
 /// Score-thresholding decorator — wraps any <see cref="IRetriever"/> and drops
-/// inner results whose <see cref="RetrievalResult.Score"/> falls below
-/// <see cref="MinScore"/>. The production safety valve for the
-/// "no good match → return nothing" path: when the corpus has nothing relevant,
-/// returning an empty list lets generation abstain ("I don't know", Ch 10)
-/// instead of being forced to ground an answer in <c>topK</c> irrelevant chunks
+/// inner results whose score falls below <see cref="MinScore"/>.
+/// The production safety valve for the "no good match → return nothing" path:
+/// when the corpus has nothing relevant, returning an empty list lets generation abstain
+/// ("I don't know") instead of being forced to ground an answer in <c>topK</c> irrelevant chunks
 /// and hallucinate.
 ///
 /// <para>
-/// The default floor of <c>0.0</c> is a pass-through (no result is dropped),
-/// so wrapping a retriever in <see cref="MinScoreFilter"/> is safe by default;
-/// raise the floor to opt in to abstention. May return fewer than <c>topK</c>
-/// results — or an empty list — by design.
+/// When evaluating fused hybrid results, if <see cref="RetrievalResult.DenseScore"/> is present,
+/// it is evaluated against <see cref="MinScore"/> (enabling cosine-calibrated abstention) rather
+/// than the raw RRF rank score, unless a custom <see cref="ScoreSelector"/> is provided.
 /// </para>
 /// </summary>
 public sealed class MinScoreFilter : IRetriever
@@ -26,25 +24,32 @@ public sealed class MinScoreFilter : IRetriever
     /// <summary>The minimum score a result must meet to survive the filter.</summary>
     public double MinScore { get; }
 
+    /// <summary>Optional custom score selector for evaluating candidates against MinScore.</summary>
+    public Func<RetrievalResult, double>? ScoreSelector { get; }
+
     /// <summary>
     /// Wrap <paramref name="inner"/> with a minimum-score floor.
     /// </summary>
     /// <param name="inner">The retriever whose results are filtered.</param>
     /// <param name="minScore">
-    /// The relevance floor. Results with <c>Score &lt; minScore</c> are dropped.
+    /// The relevance floor. Results with score &lt; minScore are dropped.
     /// The default <c>0.0</c> disables filtering (pass-through).
     /// </param>
-    public MinScoreFilter(IRetriever inner, double minScore = 0.0)
+    /// <param name="scoreSelector">
+    /// Optional custom score selector. If null, evaluates against <see cref="RetrievalResult.DenseScore"/>
+    /// when present, falling back to <see cref="RetrievalResult.Score"/>.
+    /// </param>
+    public MinScoreFilter(IRetriever inner, double minScore = 0.0, Func<RetrievalResult, double>? scoreSelector = null)
     {
         ArgumentNullException.ThrowIfNull(inner);
         _inner = inner;
         MinScore = minScore;
+        ScoreSelector = scoreSelector;
     }
 
     /// <inheritdoc />
     public string Strategy => $"min-score({_inner.Strategy})";
 
-    /// <inheritdoc />
     /// <inheritdoc />
     public Task<IReadOnlyList<RetrievalResult>> RetrieveAsync(
         string query,
@@ -68,6 +73,10 @@ public sealed class MinScoreFilter : IRetriever
             return results;
         }
 
-        return [.. results.Where(r => r.Score >= MinScore)];
+        return [.. results.Where(r =>
+        {
+            var score = ScoreSelector != null ? ScoreSelector(r) : (r.DenseScore ?? r.Score);
+            return score >= MinScore;
+        })];
     }
 }

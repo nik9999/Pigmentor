@@ -1406,6 +1406,43 @@ public sealed class RagPipelineTests
         Assert.NotNull(response);
         Assert.Empty(response.Sources);
     }
+
+    [Fact]
+    public async Task MinDenseScore_FiltersCandidates_AndAbstainsDirectlyOnLowConfidence()
+    {
+        var meta = new DocumentMetadata("doc1", "", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "Doc");
+        var chunk = new DocumentChunk("doc1#1", "doc1", 0, "Нерелевантный фрагмент.", 0, 23, meta);
+
+        var retriever = new FakeRetriever([
+            new RetrievalResult(chunk, 0.02) { FusedScore = 0.02, DenseScore = 0.20 }
+        ]);
+
+        var chat = new FakeChatGenerator("галлюцинация модели без контекста");
+        var settings = new RagPipelineSettings { MinDenseScore = 0.40 };
+        var pipeline = new RagPipeline(retriever, chat, settings: settings);
+
+        var response = await pipeline.AskAsync(new RagRequest("Вопрос", topK: 5));
+
+        Assert.Equal("В предоставленном контексте недостаточно информации для ответа на данный вопрос.", response.Answer);
+        Assert.Empty(response.Sources);
+        Assert.Equal(0, chat.CallCount); // Direct abstention without calling LLM!
+        Assert.Equal(0.20, response.Diagnostics.MaxDenseScore);
+    }
+
+    [Fact]
+    public void AskCommandHandler_DisplaysMaxDenseSimilarity_InDiagnostics()
+    {
+        var diag = new RagDiagnostics(
+            TotalLatency: TimeSpan.FromMilliseconds(120),
+            RetrievedCandidateCount: 5,
+            ContextSourceCount: 3,
+            MaxDenseScore: 0.865,
+            MaxSparseScore: 14.23);
+
+        var formatted = Pigmentor.RAG.Cli.Commands.AskCommandHandler.FormatDiagnostics(diag);
+        Assert.Contains("Max dense similarity: 0.865", formatted);
+        Assert.Contains("Max sparse score:     14.230", formatted);
+    }
 }
 
 internal sealed class RecordingReranker : IReranker

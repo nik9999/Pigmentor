@@ -67,7 +67,11 @@ public sealed class InMemoryVectorStore : IVectorStore
         // matching subset (not a post-filter that could leave fewer than K).
         var ranked = snapshot
             .Where(c => filter is null || filter.Matches(c.Chunk.Metadata))
-            .Select(c => new RetrievalResult(c.Chunk, CosineKernel.Cosine(queryVector.Span, c.Vector.Span)))
+            .Select(c =>
+            {
+                var cos = CosineKernel.Cosine(queryVector.Span, c.Vector.Span);
+                return new RetrievalResult(c.Chunk, cos) { DenseScore = cos };
+            })
             .OrderByDescending(r => r.Score)
             .Take(topK)
             .ToList();

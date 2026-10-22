@@ -39,6 +39,12 @@ public sealed class DenseRetriever : IRetriever
         ArgumentNullException.ThrowIfNull(request);
 
         var queryVec = await _embeddings.EmbedQueryAsync(request.Query, cancellationToken).ConfigureAwait(false);
-        return await _store.SearchAsync(queryVec, request.TopK, request.Filter, cancellationToken).ConfigureAwait(false);
+        var results = await _store.SearchAsync(queryVec, request.TopK, request.Filter, cancellationToken).ConfigureAwait(false);
+        if (results.Count == 0 || results.All(r => r.DenseScore.HasValue))
+        {
+            return results;
+        }
+
+        return results.Select(r => r.DenseScore.HasValue ? r : r with { DenseScore = r.Score }).ToList();
     }
 }

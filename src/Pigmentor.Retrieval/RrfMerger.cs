@@ -45,7 +45,7 @@ public sealed class RrfMerger
         ArgumentNullException.ThrowIfNull(lists);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
 
-        var fused = new Dictionary<string, (DocumentChunk Chunk, double Score)>(StringComparer.Ordinal);
+        var fused = new Dictionary<string, (DocumentChunk Chunk, double FusedScore, double? DenseScore, double? SparseScore)>(StringComparer.Ordinal);
 
         foreach (var list in lists)
         {
@@ -56,22 +56,44 @@ public sealed class RrfMerger
 
             for (int i = 0; i < list.Count; i++)
             {
-                var key = list[i].Chunk.ChunkId;
+                var item = list[i];
+                var key = item.Chunk.ChunkId;
                 var contribution = 1.0 / (K + i + 1);
                 if (fused.TryGetValue(key, out var existing))
                 {
-                    fused[key] = (existing.Chunk, existing.Score + contribution);
+                    var dense = existing.DenseScore;
+                    if (item.DenseScore.HasValue)
+                    {
+                        dense = existing.DenseScore.HasValue
+                            ? Math.Max(existing.DenseScore.Value, item.DenseScore.Value)
+                            : item.DenseScore;
+                    }
+
+                    var sparse = existing.SparseScore;
+                    if (item.SparseScore.HasValue)
+                    {
+                        sparse = existing.SparseScore.HasValue
+                            ? Math.Max(existing.SparseScore.Value, item.SparseScore.Value)
+                            : item.SparseScore;
+                    }
+
+                    fused[key] = (existing.Chunk, existing.FusedScore + contribution, dense, sparse);
                 }
                 else
                 {
-                    fused[key] = (list[i].Chunk, contribution);
+                    fused[key] = (item.Chunk, contribution, item.DenseScore, item.SparseScore);
                 }
             }
         }
 
         return [.. fused.Values
-            .OrderByDescending(x => x.Score)
+            .OrderByDescending(x => x.FusedScore)
             .Take(topK)
-            .Select(x => new RetrievalResult(x.Chunk, x.Score))];
+            .Select(x => new RetrievalResult(x.Chunk, x.FusedScore)
+            {
+                FusedScore = x.FusedScore,
+                DenseScore = x.DenseScore,
+                SparseScore = x.SparseScore
+            })];
     }
 }

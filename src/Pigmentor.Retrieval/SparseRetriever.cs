@@ -112,7 +112,7 @@ public sealed partial class SparseRetriever : IRetriever
                 }
                 if (score > 0)
                 {
-                    scored.Add(new RetrievalResult(chunk, score));
+                    scored.Add(new RetrievalResult(chunk, score) { SparseScore = score });
                 }
             }
         }

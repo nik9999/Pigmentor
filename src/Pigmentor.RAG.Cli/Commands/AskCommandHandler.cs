@@ -347,6 +347,14 @@ public sealed class AskCommandHandler
     {
         var sb = new StringBuilder();
         sb.AppendLine(CultureInfo.InvariantCulture, $"  Retrieval candidates: {diag.RetrievedCandidateCount}");
+        if (diag.MaxDenseScore.HasValue)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  Max dense similarity: {diag.MaxDenseScore.Value:F3}");
+        }
+        if (diag.MaxSparseScore.HasValue)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  Max sparse score:     {diag.MaxSparseScore.Value:F3}");
+        }
         sb.AppendLine(CultureInfo.InvariantCulture, $"  Sources used:         {diag.ContextSourceCount}");
         sb.AppendLine(CultureInfo.InvariantCulture, $"  Valid citations:      {diag.ValidCitationCount}");
         sb.AppendLine(CultureInfo.InvariantCulture, $"  Invalid citations:    {diag.InvalidCitationCount}");

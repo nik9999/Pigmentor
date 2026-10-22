@@ -27,7 +27,10 @@ public sealed record RagDiagnostics(
     TimeSpan? RetrievalLatency = null,
     TimeSpan? GenerationLatency = null,
     bool RequiredCitationsSatisfied = true,
-    bool HasInternalMarkerLeakage = false)
+    bool HasInternalMarkerLeakage = false,
+    double? MaxDenseScore = null,
+    double? MaxSparseScore = null,
+    double? MaxFusedScore = null)
 {
     /// <summary>Total execution time in milliseconds.</summary>
     public long TotalLatencyMs => (long)TotalLatency.TotalMilliseconds;

@@ -346,7 +346,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                 // Higher score = better match in Pigmentor.
                 var score = 1.0 - distance;
 
-                results.Add(new RetrievalResult(chunk, score));
+                results.Add(new RetrievalResult(chunk, score) { DenseScore = score });
             }
 
             return results;
