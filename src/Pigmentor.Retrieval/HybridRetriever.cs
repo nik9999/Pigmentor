@@ -42,7 +42,8 @@ public sealed class HybridRetriever : IRetriever
 
         // Fan out 2× topK candidates per leg; the merger picks the final topK.
         var candidateK = Math.Max(request.TopK * 2, request.TopK + 5);
-        var legRequest = request with { TopK = candidateK };
+        var effectiveFilter = request.Filter ?? QueryScopeResolver.ResolveScope(request.Query);
+        var legRequest = request with { TopK = candidateK, Filter = effectiveFilter };
         var denseTask = _dense.RetrieveAsync(legRequest, cancellationToken);
         var sparseTask = _sparse.RetrieveAsync(legRequest, cancellationToken);
 

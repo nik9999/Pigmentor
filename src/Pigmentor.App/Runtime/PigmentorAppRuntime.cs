@@ -1,5 +1,6 @@
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using OllamaSharp;
@@ -81,6 +82,7 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
 
         // Use Hosting baseline
         var builder = services.AddPigmentor();
+        services.Replace(ServiceDescriptor.Singleton<IReranker, TableAwareLexicalReranker>());
         services.Configure<RagPipelineSettings>(options =>
         {
             options.Budget = new ContextBudget(MaxTotalTokens: 8192, ReservedOutputTokens: 1024);

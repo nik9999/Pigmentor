@@ -83,6 +83,50 @@ public class RetrievalPropagationTests
     }
 
     [Fact]
+    public async Task HybridRetriever_AppliesInferredScope_ToBothLegs()
+    {
+        var denseRecorder = new RecordingRetriever("dense");
+        var sparseRecorder = new RecordingRetriever("sparse");
+        var hybrid = new HybridRetriever(denseRecorder, sparseRecorder);
+
+        await hybrid.RetrieveAsync("Какая модель имеет минимальную цену?", 4);
+
+        Assert.NotNull(denseRecorder.LastRequest?.Filter);
+        Assert.NotNull(sparseRecorder.LastRequest?.Filter);
+        var catalogMeta = CreateMeta("catalog", "sales") with { Silo = "product-catalog" };
+        var technicalMeta = CreateMeta("manual", "engineering") with { Silo = "technical-docs" };
+        Assert.True(denseRecorder.LastRequest.Filter.Matches(catalogMeta));
+        Assert.False(denseRecorder.LastRequest.Filter.Matches(technicalMeta));
+        Assert.True(sparseRecorder.LastRequest.Filter.Matches(catalogMeta));
+        Assert.False(sparseRecorder.LastRequest.Filter.Matches(technicalMeta));
+    }
+
+    [Fact]
+    public async Task TableAwareLexicalReranker_PromotesRequestedCurrentTable()
+    {
+        var meta = CreateMeta("mds", "engineering") with { Silo = "technical-docs" };
+        var generic = new RetrievalResult(
+            new DocumentChunk("generic", "mds", 0, "MDS AI-8UI. Команды DCON и настройки каналов.", 0, 48, meta),
+            1.0);
+        var table = new RetrievalResult(
+            new DocumentChunk("table", "mds", 1, """
+                | Ток | (-20…+20) | мА | ±40 мкА |
+                | Ток | (0…20) | мА | ±20 мкА |
+                | Ток | (4…20) | мА | ±16 мкА |
+                """, 49, 160, meta),
+            0.1);
+        var reranker = new TableAwareLexicalReranker();
+
+        var result = await reranker.RerankAsync(
+            "Назови все токовые диапазоны из таблицы характеристик MDS AI-8UI.",
+            [generic, table],
+            topK: 2);
+
+        Assert.Equal("table", result[0].Chunk.ChunkId);
+        Assert.True(result[0].Score > result[1].Score);
+    }
+
+    [Fact]
     public async Task MinScoreFilter_PropagatesRetrievalRequest()
     {
         var chunk1 = CreateChunk("c1", "text", "HR");

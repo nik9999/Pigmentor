@@ -17,10 +17,10 @@ public static partial class QueryScopeResolver
 
     // Catalog item queries with catalog-specific attributes:
     // e.g. "Какой товар ... имеет наибольший гарантийный срок", "товар ... гарантия", "товар ... прайс"
-    [GeneratedRegex(@"\bтовар\w*\b", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\b(?:товар\w*|модел\w*|оборудовани\w*|устройств\w*)\b", RegexOptions.IgnoreCase)]
     private static partial Regex ProductWordRegex();
 
-    [GeneratedRegex(@"\b(?:гаранти\w*|прайс\w*|артикул\w*|остат\w*|склад\w*|скидк\w*|стоимост\w*|цен\w*)\b", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\b(?:гаранти\w*|прайс\w*|артикул\w*|остат\w*|склад\w*|скидк\w*|стоимост\w*|цен\w*|дороже|дешевле)\b", RegexOptions.IgnoreCase)]
     private static partial Regex CatalogAttributeRegex();
 
     // Discount queries:
@@ -32,7 +32,7 @@ public static partial class QueryScopeResolver
     [GeneratedRegex(@"\b(?:TM-100|TM-200|PR-10|PR-25|LV-8|AI-8X)\b", RegexOptions.IgnoreCase)]
     private static partial Regex CatalogModelRegex();
 
-    [GeneratedRegex(@"\b(?:цена|цен\w*|стоимост\w*|скидк\w*|заказ\w*|купить|купи\w*|наличи\w*|стоит)\b", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\b(?:цена|цен\w*|стоимост\w*|скидк\w*|заказ\w*|купить|купи\w*|наличи\w*|стоит|гаранти\w*|дороже|дешевле)\b", RegexOptions.IgnoreCase)]
     private static partial Regex CommercialTermsRegex();
 
     // Warehouse/stock queries:

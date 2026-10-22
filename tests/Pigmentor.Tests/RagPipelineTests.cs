@@ -1,4 +1,5 @@
 using Microsoft.Extensions.AI;
+using System.Text.RegularExpressions;
 using Pigmentor.Core.Abstractions;
 using Pigmentor.Core.Documents;
 using Pigmentor.Core.Filtering;
@@ -581,6 +582,84 @@ public sealed class RagPipelineTests
 
         Assert.Equal(3, response.Diagnostics.RetrievedCandidateCount);
         Assert.True(response.Diagnostics.ContextSourceCount <= 3);
+        Assert.Contains(response.Sources, source =>
+            source.Chunk.DocumentId.StartsWith("entity-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TableQueryExecutor_EnumeratesRequestedCurrentRows()
+    {
+        var context = CreateTableContext("""
+            | Напряжение | (0…10) | В | ±10 мВ |
+            | --- | --- | --- | --- |
+            | Ток | (-20…+20) | мА | ±40 мкА |
+            | Ток | (0…20) | мА | ±20 мкА |
+            | Ток | (4…20) | мА | ±16 мкА |
+            """);
+
+        var executed = TableQueryExecutor.TryExecute(
+            "Назови все токовые диапазоны MDS AI-8UI.", context, out var answer);
+
+        Assert.True(executed);
+        Assert.Contains("-20…+20", answer);
+        Assert.Contains("0…20", answer);
+        Assert.Contains("4…20", answer);
+        Assert.Equal(3, new Regex("\\[S1\\]").Count(answer));
+    }
+
+    [Fact]
+    public void TableQueryExecutor_ComputesWarehouseColumnSum()
+    {
+        var context = CreateTableContext("""
+            | Модель | Москва | Казань |
+            | --- | --- | --- |
+            | TM-100 | 6 | 5 |
+            | TM-200 | 2 | 1 |
+            | PR-10 | 8 | 7 |
+            | PR-25 | 1 | 0 |
+            | LV-8 | 0 | 0 |
+            | AI-8X | 3 | 2 |
+            """);
+
+        var executed = TableQueryExecutor.TryExecute(
+            "Сколько единиц всех товаров находится в Москве?", context, out var answer);
+
+        Assert.True(executed);
+        Assert.Contains("20", answer);
+        Assert.Contains("[S1]", answer);
+    }
+
+    [Fact]
+    public void TableQueryExecutor_ComputesQuantityDiscount()
+    {
+        var metadata = new DocumentMetadata("catalog", "", "", "", "", "Catalog", 0, "", DateOnly.MinValue, "Catalog");
+        var prices = new RetrievalResult(new DocumentChunk("prices", "catalog", 0, """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | PR-25 | 22100 |
+            """, 0, 50, metadata), 1.0);
+        var conditions = new RetrievalResult(new DocumentChunk("conditions", "catalog", 1, """
+            | Условие | Значение |
+            | --- | --- |
+            | Скидка от 5 единиц одной модели | 7 % |
+            """, 51, 110, metadata), 0.9);
+        var context = new RagContext("", [prices, conditions], 0,
+            new Dictionary<string, RetrievalResult> { ["S1"] = prices, ["S2"] = conditions });
+
+        var executed = TableQueryExecutor.TryExecute(
+            "Рассчитай стоимость пяти единиц PR-25 до скидки и после скидки.", context, out var answer);
+
+        Assert.True(executed);
+        Assert.Contains("110500", answer);
+        Assert.Contains("102765", answer);
+        Assert.Contains("7 %", answer);
+    }
+
+    private static RagContext CreateTableContext(string tableText)
+    {
+        var metadata = new DocumentMetadata("table", "", "", "", "", "Table", 0, "", DateOnly.MinValue, "Table");
+        var result = new RetrievalResult(new DocumentChunk("table#1", "table", 0, tableText, 0, tableText.Length, metadata), 1.0);
+        return new RagContext("", [result], 0, new Dictionary<string, RetrievalResult> { ["S1"] = result });
     }
 
     [Fact]

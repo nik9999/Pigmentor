@@ -221,6 +221,8 @@ public sealed class DogfoodingCorrectiveHardeningTests
     [InlineData("Какой товар в каталоге имеет максимальную стоимость?")]
     [InlineData("Выведи по каталогу цены на оборудование")]
     [InlineData("Какой товар имеет наибольший гарантийный срок?")]
+    [InlineData("Какая модель с RS-485 / Modbus RTU имеет минимальную цену?")]
+    [InlineData("Каков гарантийный срок модуля AI-8X?")]
     [InlineData("Сколько единиц оборудования есть на складе?")]
     [InlineData("На каком складе больше всего PR-10 и сколько единиц?")]
     public void QueryScopeResolver_ResolvesProductCatalogScope_ForExplicitCatalogQueries(string query)
@@ -327,13 +329,13 @@ public sealed class DogfoodingCorrectiveHardeningTests
     {
         var meta = new DocumentMetadata("mds-table", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
         var snippet = """
-            | Параметр | Диапазон | Единица |
-            | --- | --- | --- |
-            | Число каналов ввода | 8 | шт. |
-            | Ток | (-20…+20) | мА |
-            | Ток | (0…20) | мА |
-            | Ток | (4…20) | мА |
-            | Напряжение | (0…10) | В |
+            | Параметр | Диапазон | Единица | Погрешность |
+            | --- | --- | --- | --- |
+            | Число каналов ввода | 8 | шт. | - |
+            | Ток | (-20…+20) | мА | ±40 мкА |
+            | Ток | (0…20) | мА | ±20 мкА |
+            | Ток | (4…20) | мА | ±16 мкА |
+            | Напряжение | (0…10) | В | ±10 мВ |
             """;
         var citation = new Citation(1, "mds-table", "mds-table#1", "MDS AI-8UI", snippet, meta);
         var question = "Сколько каналов у MDS AI-8UI и какие диапазоны тока он поддерживает?";
@@ -351,6 +353,20 @@ public sealed class DogfoodingCorrectiveHardeningTests
         var correct = EvidenceValidator.ValidateEvidenceWithReason(
             "MDS AI-8UI имеет 8 каналов; ток: (-20…+20) мА, (0…20) мА, (4…20) мА [S1].", [citation], question);
         Assert.True(correct.IsValid, correct.Reason);
+
+        var headerUnitAnswer = """
+            | Диапазон (мА) | Погрешность |
+            | --- | --- |
+            | -20…20 | ±40 мкА |
+            | 0…20 | ±20 мкА |
+            | 4…20 | ±16 мкА |
+            [S1]
+            """;
+        var headerUnitResult = EvidenceValidator.ValidateEvidenceWithReason(
+            headerUnitAnswer,
+            [citation],
+            "Назови все токовые диапазоны MDS AI-8UI.");
+        Assert.True(headerUnitResult.IsValid, headerUnitResult.Reason);
     }
 
     [Fact]
@@ -1618,6 +1634,194 @@ public sealed class DogfoodingCorrectiveHardeningTests
         var rounded = EvidenceValidator.ValidateEvidenceWithReason("Москва — 0 [S1]", [citation], question);
         Assert.False(rounded.IsValid);
         Assert.Contains("0.002", rounded.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_PriceDifference_RejectsWrongArithmetic()
+    {
+        var meta = new DocumentMetadata("catalog-price-diff", Silo: "product-catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-200 | 19600 |
+            | PR-25 | 22100 |
+            """;
+        var citation = new Citation(1, "catalog-price-diff", "catalog-price-diff#1", "Catalog", snippet, meta);
+        const string question = "На сколько рублей PR-25 дороже TM-200?";
+
+        var wrong = EvidenceValidator.ValidateEvidenceWithReason("PR-25 дороже на 25100 рублей [S1].", [citation], question);
+        Assert.False(wrong.IsValid);
+        Assert.Contains("2500", wrong.Reason);
+
+        var correct = EvidenceValidator.ValidateEvidenceWithReason("PR-25 дороже на 2500 рублей [S1].", [citation], question);
+        Assert.True(correct.IsValid, correct.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_WarehouseColumnAggregate_RejectsWrongSum()
+    {
+        var meta = new DocumentMetadata("warehouse-sum", Silo: "product-catalog", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var snippet = """
+            | Модель | Москва | Казань |
+            | --- | --- | --- |
+            | TM-100 | 6 | 5 |
+            | TM-200 | 2 | 1 |
+            | PR-10 | 8 | 7 |
+            | PR-25 | 1 | 0 |
+            | LV-8 | 0 | 0 |
+            | AI-8X | 3 | 2 |
+            """;
+        var citation = new Citation(1, "warehouse-sum", "warehouse-sum#1", "Warehouse", snippet, meta);
+        const string question = "Сколько единиц всех моделей находится на складе Москва?";
+
+        var wrong = EvidenceValidator.ValidateEvidenceWithReason("На складе Москва 14 единиц [S1].", [citation], question);
+        Assert.False(wrong.IsValid);
+        Assert.Contains("20", wrong.Reason);
+
+        var correct = EvidenceValidator.ValidateEvidenceWithReason("На складе Москва 20 единиц [S1].", [citation], question);
+        Assert.True(correct.IsValid, correct.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_AnalogInputTerminalPair_RequiresBothTerminals()
+    {
+        var meta = new DocumentMetadata("terminals", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
+        var snippet = """
+            | Клемма | Сигнал | Тип |
+            | --- | --- | --- |
+            | X1:7 | AI 4+ | Вход 4+ |
+            | X1:8 | AI 4- | Вход 4- |
+            | X1:9 | AI 5+ | Вход 5+ |
+            | X1:10 | AI 5- | Вход 5- |
+            """;
+        var citation = new Citation(1, "terminals", "terminals#1", "MDS AI-8UI", snippet, meta);
+        const string question = "Какие клеммы X1 соответствуют четвёртому аналоговому входу MDS AI-8UI?";
+
+        var wrong = EvidenceValidator.ValidateEvidenceWithReason("Используется X1:10 [S1].", [citation], question);
+        Assert.False(wrong.IsValid);
+        Assert.Contains("X1:7", wrong.Reason);
+        Assert.Contains("X1:8", wrong.Reason);
+
+        var correct = EvidenceValidator.ValidateEvidenceWithReason("Используются X1:7 и X1:8 [S1].", [citation], question);
+        Assert.True(correct.IsValid, correct.Reason);
+    }
+
+    [Theory]
+    [InlineData("Разрешена ли эксплуатация PX-400 при напряжении питания 29 В?")]
+    [InlineData("Разрешена ли эксплуатация PX-400 при напряжении питания 19 В?")]
+    public void EvidenceValidator_OperationalVoltageThreshold_RejectsFalseUnknown(string question)
+    {
+        var meta = new DocumentMetadata("px-limits", Silo: "technical-docs", "", "", "", "Regulation", 2026, "", DateOnly.MinValue, "PX-400");
+        const string snippet = "При напряжении питания ниже 20 В или выше 28 В эксплуатация PX-400 запрещена.";
+        var citation = new Citation(1, "px-limits", "px-limits#1", "PX-400", snippet, meta);
+
+        var wrong = EvidenceValidator.ValidateEvidenceWithReason("Информация отсутствует [S1].", [citation], question);
+        Assert.False(wrong.IsValid);
+
+        var correct = EvidenceValidator.ValidateEvidenceWithReason("Эксплуатация запрещена [S1].", [citation], question);
+        Assert.True(correct.IsValid, correct.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_SingleRangeAccuracy_DoesNotRequireAllRanges()
+    {
+        var meta = new DocumentMetadata("accuracy", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
+        const string snippet = "| Напряжение | (-250…+250) | мВ | ±500 мкВ |";
+        var citation = new Citation(1, "accuracy", "accuracy#1", "MDS AI-8UI", snippet, meta);
+
+        var result = EvidenceValidator.ValidateEvidenceWithReason(
+            "Основная погрешность для (-250…+250) мВ составляет ±500 мкВ [S1].",
+            [citation],
+            "Какова основная погрешность на диапазоне (-250…+250) мВ у MDS AI-8UI?");
+
+        Assert.True(result.IsValid, result.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_DconCommand_MustExistInCitedSource()
+    {
+        var meta = new DocumentMetadata("dcon", Silo: "technical-docs", "", "", "", "Manual", 2026, "", DateOnly.MinValue, "MDS AI-8UI");
+        const string snippet = "| Сетевой адрес | $AA2 | !AAttccff |";
+        var citation = new Citation(1, "dcon", "dcon#1", "MDS AI-8UI", snippet, meta);
+        const string question = "Какая команда DCON используется для чтения сетевого адреса MDS AI-8UI?";
+
+        var wrong = EvidenceValidator.ValidateEvidenceWithReason("Используется команда $AAF [S1].", [citation], question);
+        Assert.False(wrong.IsValid);
+
+        var correct = EvidenceValidator.ValidateEvidenceWithReason("Используется команда $AA2 [S1].", [citation], question);
+        Assert.True(correct.IsValid, correct.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_SpacedPrice_DoesNotMatchShortValueFromOtherRow()
+    {
+        var meta = new DocumentMetadata("spaced-price", Silo: "product-catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. | Гарантия, мес. |
+            | --- | --- | --- |
+            | TM-100 | 12800 | 24 |
+            | LV-8 | 9800 | 12 |
+            """;
+        var citation = new Citation(1, "spaced-price", "spaced-price#1", "Catalog", snippet, meta);
+
+        var result = EvidenceValidator.ValidateEvidenceWithReason(
+            "Цена TM-100 составляет 12 800 рублей [S1].",
+            [citation],
+            "Сколько стоит TM-100?");
+
+        Assert.True(result.IsValid, result.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_CitationOnlyAnswer_IsRejected()
+    {
+        var meta = new DocumentMetadata("citation-only", Silo: "product-catalog", "", "", "", "Warehouse", 2026, "", DateOnly.MinValue, "Warehouse");
+        var citation = new Citation(1, "citation-only", "citation-only#1", "Warehouse", "| Модель | Екатеринбург |\n| --- | --- |\n| TM-100 | 3 |", meta);
+
+        var result = EvidenceValidator.ValidateEvidenceWithReason("[S1]", [citation], "Сколько единиц находится в Екатеринбурге?");
+
+        Assert.False(result.IsValid);
+        Assert.Contains("только ссылки", result.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_PriceThresholdEnumeration_RequiresAllMatchingModels()
+    {
+        var meta = new DocumentMetadata("price-filter", Silo: "product-catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var snippet = """
+            | Модель | Цена, руб. |
+            | --- | --- |
+            | TM-100 | 12800 |
+            | TM-200 | 19600 |
+            | PR-10 | 15400 |
+            | PR-25 | 22100 |
+            | LV-8 | 9800 |
+            """;
+        var citation = new Citation(1, "price-filter", "price-filter#1", "Catalog", snippet, meta);
+        const string question = "Какие товары стоят дешевле 20000 рублей?";
+
+        var incomplete = EvidenceValidator.ValidateEvidenceWithReason("TM-100 и PR-10 [S1].", [citation], question);
+        Assert.False(incomplete.IsValid);
+        Assert.Contains("TM-200", incomplete.Reason);
+        Assert.Contains("LV-8", incomplete.Reason);
+
+        var complete = EvidenceValidator.ValidateEvidenceWithReason("TM-100, TM-200, PR-10 и LV-8 [S1].", [citation], question);
+        Assert.True(complete.IsValid, complete.Reason);
+    }
+
+    [Fact]
+    public void EvidenceValidator_CalculationQuestion_RequiresSubtotalAndDiscountedTotal()
+    {
+        var meta = new DocumentMetadata("calculation-complete", Silo: "product-catalog", "", "", "", "Catalog", 2026, "", DateOnly.MinValue, "Catalog");
+        var price = new Citation(1, "calculation-complete", "price", "Catalog", "| Модель | Цена, руб. |\n| --- | --- |\n| PR-25 | 22100 |", meta);
+        var discount = new Citation(2, "calculation-complete", "discount", "Conditions", "| Условие | Значение |\n| --- | --- |\n| Скидка от 5 единиц одной модели | 7 % |", meta);
+        const string question = "Сколько стоят 5 единиц PR-25 до скидки и после скидки?";
+
+        var incomplete = EvidenceValidator.ValidateEvidenceWithReason("5 единиц PR-25 стоят 22100 руб. после скидки [S1].", [price, discount], question);
+        Assert.False(incomplete.IsValid);
+
+        var complete = EvidenceValidator.ValidateEvidenceWithReason("До скидки: 22100 × 5 = 110500 руб. [S1]. Скидка 7 %. Итог после скидки: 102765 руб. [S2].", [price, discount], question);
+        Assert.True(complete.IsValid, complete.Reason);
     }
 
     private sealed class CountingStaticChatClient : IChatClient

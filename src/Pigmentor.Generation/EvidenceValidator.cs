@@ -28,7 +28,7 @@ public static partial class EvidenceValidator
     [GeneratedRegex(@"\b(\d[\d\s]{2,}\d)\s*(?:руб\w*|\$|€)", RegexOptions.IgnoreCase)]
     private static partial Regex PriceRegex();
 
-    [GeneratedRegex(@"\b(?:стоимост\w*|стои[тт]\w*|цен\w*|заказ\w*|расчет\w*|расчёт\w*|рассчит\w*|итог\w*|купить|покупк\w*|оплат\w*|cost\w*|price\w*|total\w*|order\w*|calculat\w*|comput\w*|purchas\w*)\b", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\b(?:стоимост\w*|стои[тт]\w*|стоят\w*|цен\w*|заказ\w*|расчет\w*|расчёт\w*|рассчит\w*|итог\w*|купить|покупк\w*|оплат\w*|cost\w*|price\w*|total\w*|order\w*|calculat\w*|comput\w*|purchas\w*)\b", RegexOptions.IgnoreCase)]
     private static partial Regex CalculationQuestionRegex();
 
     [GeneratedRegex(@"\b(?:цен\w*|стоимост\w*|price\w*|cost\w*)\b", RegexOptions.IgnoreCase)]
@@ -81,6 +81,9 @@ public static partial class EvidenceValidator
 
     [GeneratedRegex(@"(?<![\p{L}\p{N}_+\-])(?<number>[+\-]?[0-9]+(?:[\.,][0-9]+)?)(?![\p{L}\p{N}_]|[\.,][0-9])")]
     private static partial Regex SignedDecimalRegex();
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}_])(?<low>[+\-]?\d+(?:[\.,]\d+)?)\s*(?:…|\.\.\.|–|—|-)\s*(?<high>[+\-]?\d+(?:[\.,]\d+)?)(?![\p{L}\p{N}_])")]
+    private static partial Regex RangeWithoutUnitRegex();
 
     [GeneratedRegex(
         @"(?:\b(?:нет\s+(?:точной\s+|достоверной\s+|какой-либо\s+)?информаци\w*|нет\s+данных|нет\s+сведений)\b|\bинформаци\w*(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+информаци\w*|\bданные(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+данные\b|\bсведения(?:\s+[^\s\.,;!?]+){0,10}\s+отсутству\w*|\bотсутству\w*(?:\s+[^\s\.,;!?]+){0,10}\s+сведения\b|\bнеизвестн\w*\b|\bнедостаточно\s+информаци\w*\b|\b(?:no\s+information|unknown|insufficient\s+information|not\s+specified)\b)",
@@ -171,7 +174,20 @@ public static partial class EvidenceValidator
             return false;
         }
 
-        var source = string.Join("\n", sourceSnippets);
+        var relevantSnippets = sourceSnippets.ToList();
+        var requestedModels = FindRequestedModelIdentifiers(question);
+        if (requestedModels.Count > 0)
+        {
+            relevantSnippets = relevantSnippets
+                .Where(snippet => requestedModels.Any(model => ContainsModelIdentifier(snippet, model)))
+                .ToList();
+            if (relevantSnippets.Count == 0)
+            {
+                return false;
+            }
+        }
+
+        var source = string.Join("\n", relevantSnippets);
         if (Regex.IsMatch(question, @"\bканал\w*\b", RegexOptions.IgnoreCase) &&
             Regex.IsMatch(source, @"(?:число|количество)\s+канал\w*|\b\d+\s+канал\w*", RegexOptions.IgnoreCase))
         {
@@ -196,6 +212,19 @@ public static partial class EvidenceValidator
             return true;
         }
 
+        if (Regex.IsMatch(question, @"\bразрешен\w*\s+ли\s+эксплуатаци\w*\b", RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(source, @"ниже\s+\d+(?:[\.,]\d+)?\s*В\s+или\s+выше\s+\d+(?:[\.,]\d+)?\s*В[^.]*запрещен", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
+        if (question.Contains("DCON", StringComparison.OrdinalIgnoreCase) &&
+            Regex.IsMatch(question, @"\bкоманд\w*\b", RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(source, @"[$~][A-Z]{2,}\w*", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
         return false;
     }
 
@@ -215,6 +244,12 @@ public static partial class EvidenceValidator
         if (citations.Count == 0)
         {
             return (false, "Отсутствуют обязательные ссылки [S#] на источники контекста");
+        }
+
+        var factualText = Regex.Replace(answer, @"\[(?:[sс]\d+)(?:\s*[,;]\s*[sс]?\d+)*\]", string.Empty, RegexOptions.IgnoreCase);
+        if (!Regex.IsMatch(factualText, @"[\p{L}\p{N}]"))
+        {
+            return (false, "Ответ содержит только ссылки и не содержит фактического содержания");
         }
 
         // 1. Table row/category fidelity (voltage under current or current under voltage)
@@ -537,7 +572,25 @@ public static partial class EvidenceValidator
             return (false, enumerationReason);
         }
 
-        return ValidateMaintenanceVoltageIntent(answer, citations, question);
+        var validations = new Func<(bool IsValid, string? Reason)>[]
+        {
+            () => ValidateMaintenanceVoltageIntent(answer, citations, question),
+            () => ValidatePriceDifference(answer, tables, question),
+            () => ValidateCatalogPriceFilter(answer, tables, question),
+            () => ValidateWarehouseColumnAggregate(answer, tables, question),
+            () => ValidateAnalogInputTerminals(answer, tables, question),
+            () => ValidateOperationalVoltageThreshold(answer, citations, question),
+            () => ValidateDconCommand(answer, citations, question)
+        };
+        foreach (var validation in validations)
+        {
+            var result = validation();
+            if (!result.IsValid)
+            {
+                return result;
+            }
+        }
+        return (true, null);
     }
 
     private static (bool IsValid, string? Reason) ValidateRequestedChannelCount(
@@ -545,13 +598,7 @@ public static partial class EvidenceValidator
         IReadOnlyList<Citation> citations,
         string question)
     {
-        if (!Regex.IsMatch(question, @"\bканал\w*\b", RegexOptions.IgnoreCase))
-        {
-            return (true, null);
-        }
-
-        var answerMatch = Regex.Match(answer, @"\b(?<count>\d+)\s+(?:независим\w+\s+)?канал\w*\b", RegexOptions.IgnoreCase);
-        if (!answerMatch.Success || !int.TryParse(answerMatch.Groups["count"].Value, out var answerCount))
+        if (!Regex.IsMatch(question, @"(?:\bсколько\b|\bчисло\b|\bколичество\b)[^?\r\n]{0,40}\bканал\w*\b", RegexOptions.IgnoreCase))
         {
             return (true, null);
         }
@@ -566,6 +613,12 @@ public static partial class EvidenceValidator
             return (true, null);
         }
 
+        var answerMatch = Regex.Match(answer, @"\b(?<count>\d+)\s+(?:независим\w+\s+)?канал\w*\b", RegexOptions.IgnoreCase);
+        if (!answerMatch.Success || !int.TryParse(answerMatch.Groups["count"].Value, out var answerCount))
+        {
+            return (false, $"Ответ не содержит запрошенное число каналов {expectedCount}");
+        }
+
         return answerCount == expectedCount
             ? (true, null)
             : (false, $"Число каналов {answerCount} не соответствует значению {expectedCount} в цитируемом источнике");
@@ -576,7 +629,8 @@ public static partial class EvidenceValidator
         IReadOnlyList<ParsedTable> tables,
         string question)
     {
-        if (!Regex.IsMatch(question, @"\bдиапазон\w*\b", RegexOptions.IgnoreCase))
+        if (!Regex.IsMatch(question, @"\bдиапазон\w*\b", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(question, @"\bпогрешност\w*\b", RegexOptions.IgnoreCase))
         {
             return (true, null);
         }
@@ -605,6 +659,15 @@ public static partial class EvidenceValidator
                 {
                     expected.Add(NormalizeRangeKey(match));
                 }
+
+                var headerUnit = ResolveRangeHeaderUnit(table.Headers, isCurrentRow, isVoltageRow);
+                if (headerUnit != null)
+                {
+                    foreach (Match match in RangeWithoutUnitRegex().Matches(rowText))
+                    {
+                        expected.Add(NormalizeRangeKey(match, headerUnit));
+                    }
+                }
             }
         }
 
@@ -616,6 +679,14 @@ public static partial class EvidenceValidator
         var actual = RangeWithUnitRegex().Matches(answer)
             .Select(NormalizeRangeKey)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var answerHeaderUnit = ResolveAnswerRangeHeaderUnit(answer, wantsCurrent, wantsVoltage);
+        if (answerHeaderUnit != null)
+        {
+            foreach (Match match in RangeWithoutUnitRegex().Matches(answer))
+            {
+                actual.Add(NormalizeRangeKey(match, answerHeaderUnit));
+            }
+        }
         var missing = expected.Where(key => !actual.Contains(key)).ToList();
         return missing.Count == 0
             ? (true, null)
@@ -628,6 +699,34 @@ public static partial class EvidenceValidator
         var high = match.Groups["high"].Value.Replace(',', '.');
         var unit = match.Groups["unit"].Value.ToLowerInvariant();
         return $"{low}…{high} {unit}";
+    }
+
+    private static string NormalizeRangeKey(Match match, string unit)
+    {
+        var low = match.Groups["low"].Value.Replace(',', '.');
+        var high = match.Groups["high"].Value.Replace(',', '.');
+        return $"{low}…{high} {unit.ToLowerInvariant()}";
+    }
+
+    private static string? ResolveRangeHeaderUnit(IReadOnlyList<string>? headers, bool currentRow, bool voltageRow)
+    {
+        if (headers == null)
+        {
+            return null;
+        }
+        var header = string.Join(" ", headers);
+        if (currentRow && Regex.IsMatch(header, @"\bмА\b", RegexOptions.IgnoreCase)) return "мА";
+        if (voltageRow && Regex.IsMatch(header, @"\bмВ\b", RegexOptions.IgnoreCase)) return "мВ";
+        if (voltageRow && Regex.IsMatch(header, @"\bВ\b", RegexOptions.IgnoreCase)) return "В";
+        return null;
+    }
+
+    private static string? ResolveAnswerRangeHeaderUnit(string answer, bool wantsCurrent, bool wantsVoltage)
+    {
+        if (wantsCurrent && Regex.IsMatch(answer, @"Диапазон\s*(?:\([^)]*мА[^)]*\)|[,;:]?\s*мА)", RegexOptions.IgnoreCase)) return "мА";
+        if (wantsVoltage && Regex.IsMatch(answer, @"Диапазон\s*(?:\([^)]*мВ[^)]*\)|[,;:]?\s*мВ)", RegexOptions.IgnoreCase)) return "мВ";
+        if (wantsVoltage && Regex.IsMatch(answer, @"Диапазон\s*(?:\([^)]*\bВ\b[^)]*\)|[,;:]?\s*В\b)", RegexOptions.IgnoreCase)) return "В";
+        return null;
     }
 
     private static (bool IsValid, string? Reason) ValidateRequestedCatalogEnumeration(
@@ -715,6 +814,258 @@ public static partial class EvidenceValidator
 
     private static string NormalizeToleranceKey(Match match) =>
         $"{match.Groups["num"].Value.Replace(',', '.')} {match.Groups["unit"].Value.ToLowerInvariant()} ±{match.Groups["tol"].Value.Replace(',', '.')}%";
+
+    private static (bool IsValid, string? Reason) ValidatePriceDifference(
+        string answer, IReadOnlyList<ParsedTable> tables, string question)
+    {
+        if (!Regex.IsMatch(question, @"\bна\s+сколько\b[^?\r\n]*\b(?:дороже|дешевле)\b", RegexOptions.IgnoreCase))
+        {
+            return (true, null);
+        }
+
+        var models = FindRequestedModelIdentifiers(question);
+        if (models.Count != 2)
+        {
+            return (true, null);
+        }
+
+        var prices = new List<decimal>();
+        foreach (var model in models)
+        {
+            var found = false;
+            foreach (var table in tables)
+            {
+                if (TryResolveUnitPrice(table, model, out var price))
+                {
+                    prices.Add(price);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                return (true, null);
+            }
+        }
+
+        var difference = Math.Abs(prices[0] - prices[1]);
+        var expected = difference.ToString("0.##", CultureInfo.InvariantCulture);
+        return ContainsValueToken(answer, expected)
+            ? (true, null)
+            : (false, $"Разность цен должна составлять {expected} руб. ({prices[0]:0.##} и {prices[1]:0.##})");
+    }
+
+    private static (bool IsValid, string? Reason) ValidateCatalogPriceFilter(
+        string answer, IReadOnlyList<ParsedTable> tables, string question)
+    {
+        var thresholdMatch = Regex.Match(
+            question,
+            @"\b(?<comparison>дешевле|дороже)\s+(?<threshold>\d[\d\s]*)\s*(?:руб|рубл)",
+            RegexOptions.IgnoreCase);
+        if (!thresholdMatch.Success ||
+            !decimal.TryParse(thresholdMatch.Groups["threshold"].Value.Replace(" ", ""), NumberStyles.Number, CultureInfo.InvariantCulture, out var threshold))
+        {
+            return (true, null);
+        }
+
+        var cheaper = thresholdMatch.Groups["comparison"].Value.Equals("дешевле", StringComparison.OrdinalIgnoreCase);
+        var expectedModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var table in tables)
+        {
+            var priceColumn = ResolvePriceColumn(table);
+            if (priceColumn < 0)
+            {
+                continue;
+            }
+            foreach (var row in table.Rows)
+            {
+                if (priceColumn >= row.Cells.Count || !TryParsePriceDecimal(row.Cells[priceColumn], out var price))
+                {
+                    continue;
+                }
+                if ((cheaper && price >= threshold) || (!cheaper && price <= threshold))
+                {
+                    continue;
+                }
+                var model = row.EntityKeys.FirstOrDefault(ModelIdentifierRegex().IsMatch);
+                if (model != null)
+                {
+                    expectedModels.Add(model);
+                }
+            }
+        }
+
+        if (expectedModels.Count == 0)
+        {
+            return (true, null);
+        }
+        var missing = expectedModels.Where(model => !ContainsModelIdentifier(answer, model)).ToList();
+        return missing.Count == 0
+            ? (true, null)
+            : (false, $"Ответ перечисляет не все модели {thresholdMatch.Groups["comparison"].Value} {threshold:0.##} руб.; отсутствуют: {string.Join(", ", missing)}");
+    }
+
+    private static (bool IsValid, string? Reason) ValidateWarehouseColumnAggregate(
+        string answer, IReadOnlyList<ParsedTable> tables, string question)
+    {
+        if ((!Regex.IsMatch(question, @"\b(?:суммарно|сумма|всего)\b", RegexOptions.IgnoreCase) &&
+             !Regex.IsMatch(question, @"\bвсех\s+модел\w*\b", RegexOptions.IgnoreCase)) ||
+            !Regex.IsMatch(question, @"\bсклад\w*\b", RegexOptions.IgnoreCase))
+        {
+            return (true, null);
+        }
+
+        foreach (var table in tables)
+        {
+            if (table.Headers == null || table.Rows.Count < 2)
+            {
+                continue;
+            }
+            var columnIndex = Enumerable.Range(0, table.Headers.Count)
+                .FirstOrDefault(i => ContainsExactWord(question, table.Headers[i]), -1);
+            if (columnIndex <= 0)
+            {
+                continue;
+            }
+
+            decimal sum = 0;
+            var parsedRows = 0;
+            foreach (var row in table.Rows)
+            {
+                if (columnIndex < row.Cells.Count &&
+                    decimal.TryParse(row.Cells[columnIndex].Replace(" ", "").Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out var value))
+                {
+                    sum += value;
+                    parsedRows++;
+                }
+            }
+            if (parsedRows < 2)
+            {
+                continue;
+            }
+
+            var expected = sum.ToString("0.##", CultureInfo.InvariantCulture);
+            return ContainsValueToken(answer, expected)
+                ? (true, null)
+                : (false, $"Сумма значений колонки '{table.Headers[columnIndex]}' должна составлять {expected}");
+        }
+        return (true, null);
+    }
+
+    private static (bool IsValid, string? Reason) ValidateAnalogInputTerminals(
+        string answer, IReadOnlyList<ParsedTable> tables, string question)
+    {
+        if (!Regex.IsMatch(question, @"\bклемм\w*\b", RegexOptions.IgnoreCase) ||
+            !Regex.IsMatch(question, @"\bаналогов\w*\s+вход\w*\b", RegexOptions.IgnoreCase))
+        {
+            return (true, null);
+        }
+
+        var inputNumber = ResolveOrdinalNumber(question);
+        if (inputNumber == null)
+        {
+            return (true, null);
+        }
+
+        var expected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var channelPattern = $@"\bAI\s*{inputNumber.Value}\s*[+-](?!\d)";
+        foreach (var row in tables.SelectMany(table => table.Rows))
+        {
+            if (!row.Cells.Any(cell => Regex.IsMatch(cell, channelPattern, RegexOptions.IgnoreCase)))
+            {
+                continue;
+            }
+            var terminal = row.Cells.FirstOrDefault(cell => Regex.IsMatch(cell, @"\bX1:\d+\b", RegexOptions.IgnoreCase));
+            if (terminal != null)
+            {
+                expected.Add(terminal);
+            }
+        }
+
+        if (expected.Count == 0)
+        {
+            return (false, $"Цитируемые источники не содержат таблицу клемм аналогового входа {inputNumber}");
+        }
+        var missing = expected.Where(terminal => !ContainsExactWord(answer, terminal)).ToList();
+        return missing.Count == 0
+            ? (true, null)
+            : (false, $"Для аналогового входа {inputNumber} необходимо указать клеммы: {string.Join(", ", expected)}");
+    }
+
+    private static int? ResolveOrdinalNumber(string text)
+    {
+        var digit = Regex.Match(text, @"\b(?<number>[1-8])(?:-?(?:й|ый|ой|му|го))?\b", RegexOptions.IgnoreCase);
+        if (digit.Success && int.TryParse(digit.Groups["number"].Value, out var number))
+        {
+            return number;
+        }
+        string[] stems = ["перв", "втор", "трет", "четв", "пят", "шест", "седьм", "восьм"];
+        var lower = text.ToLowerInvariant();
+        for (var i = 0; i < stems.Length; i++)
+        {
+            if (lower.Contains(stems[i], StringComparison.Ordinal))
+            {
+                return i + 1;
+            }
+        }
+        return null;
+    }
+
+    private static (bool IsValid, string? Reason) ValidateOperationalVoltageThreshold(
+        string answer, IReadOnlyList<Citation> citations, string question)
+    {
+        if (!Regex.IsMatch(question, @"\bразрешен\w*\s+ли\s+эксплуатаци\w*\b", RegexOptions.IgnoreCase))
+        {
+            return (true, null);
+        }
+
+        var requestedMatch = Regex.Match(question, @"\b(?<value>\d+(?:[\.,]\d+)?)\s*В\b", RegexOptions.IgnoreCase);
+        var source = string.Join("\n", citations.Select(c => c.Snippet ?? string.Empty));
+        var limits = Regex.Match(source, @"ниже\s+(?<low>\d+(?:[\.,]\d+)?)\s*В\s+или\s+выше\s+(?<high>\d+(?:[\.,]\d+)?)\s*В[^.]*запрещен", RegexOptions.IgnoreCase);
+        if (!requestedMatch.Success || !limits.Success ||
+            !decimal.TryParse(requestedMatch.Groups["value"].Value.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out var requested) ||
+            !decimal.TryParse(limits.Groups["low"].Value.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out var low) ||
+            !decimal.TryParse(limits.Groups["high"].Value.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out var high))
+        {
+            return (true, null);
+        }
+
+        if (requested >= low && requested <= high)
+        {
+            return (true, null);
+        }
+        var statesProhibited = Regex.IsMatch(answer, @"\b(?:не\s+разрешен\w*|запрещен\w*|нельзя|недопустим\w*)\b", RegexOptions.IgnoreCase);
+        return statesProhibited
+            ? (true, null)
+            : (false, $"При напряжении {requested:0.##} В эксплуатация запрещена: границы {low:0.##}–{high:0.##} В");
+    }
+
+    private static (bool IsValid, string? Reason) ValidateDconCommand(
+        string answer, IReadOnlyList<Citation> citations, string question)
+    {
+        if (!question.Contains("DCON", StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(question, @"\bкоманд\w*\b", RegexOptions.IgnoreCase))
+        {
+            return (true, null);
+        }
+
+        var commandMatches = Regex.Matches(answer, @"(?<![\p{L}\p{N}_])(?<command>[$~][A-Z]{2,}[A-Z0-9]*)", RegexOptions.IgnoreCase);
+        if (commandMatches.Count == 0)
+        {
+            return (false, "Ответ не содержит запрошенную команду DCON");
+        }
+
+        var source = string.Join("\n", citations.Select(c => c.Snippet ?? string.Empty));
+        foreach (Match match in commandMatches)
+        {
+            var command = match.Groups["command"].Value;
+            if (!source.Contains(command, StringComparison.OrdinalIgnoreCase))
+            {
+                return (false, $"Команда DCON '{command}' отсутствует в цитируемом источнике");
+            }
+        }
+        return (true, null);
+    }
 
     private static bool ContainsExactWord(string source, string word)
     {
@@ -985,7 +1336,7 @@ public static partial class EvidenceValidator
         }
 
         var cleanVal = valStr.Replace(" ", "").Replace("\u00A0", "");
-        var pattern = @"(?<![A-Za-zА-Яа-я0-9_-]|[0-9][\.,])" + Regex.Escape(valStr) + @"(?![A-Za-zА-Яа-я0-9_-]|[\.,][0-9])";
+        var pattern = @"(?<![A-Za-zА-Яа-я0-9_-]|[0-9][\.,])" + Regex.Escape(valStr) + @"(?![A-Za-zА-Яа-я0-9_-]|[\.,][0-9]|\s+[0-9])";
         if (Regex.IsMatch(statement, pattern, RegexOptions.IgnoreCase))
         {
             return true;
@@ -993,7 +1344,7 @@ public static partial class EvidenceValidator
 
         if (cleanVal != valStr && cleanVal.Length >= 4)
         {
-            var patternClean = @"(?<![A-Za-zА-Яа-я0-9_-]|[0-9][\.,])" + Regex.Escape(cleanVal) + @"(?![A-Za-zА-Яа-я0-9_-]|[\.,][0-9])";
+            var patternClean = @"(?<![A-Za-zА-Яа-я0-9_-]|[0-9][\.,])" + Regex.Escape(cleanVal) + @"(?![A-Za-zА-Яа-я0-9_-]|[\.,][0-9]|\s+[0-9])";
             if (Regex.IsMatch(statement, patternClean, RegexOptions.IgnoreCase))
             {
                 return true;
@@ -1441,7 +1792,7 @@ public static partial class EvidenceValidator
         }
         if (lower.Contains("наименьш") || lower.Contains("минимальн") || lower.Contains("минимум") ||
             lower.Contains("меньше всего") || lower.Contains("меньше всех") ||
-            Regex.IsMatch(lower, @"\bсам\w*\s+(?:мал\w*|низк\w*)\b") ||
+            Regex.IsMatch(lower, @"\bсам\w*\s+(?:мал\w*|низк\w*|коротк\w*)\b") ||
             Regex.IsMatch(lower, @"\b(?:minimum|smallest|lowest|least|fewest|min)\b"))
         {
             isMaximum = false;
@@ -2197,7 +2548,12 @@ public static partial class EvidenceValidator
             }
         }
 
-        return (true, null);
+        if (ContainsValueToken(answer, expectedSubtotal.ToString("0.##", CultureInfo.InvariantCulture)))
+        {
+            return (true, null);
+        }
+
+        return (false, $"Ответ не содержит обязательный расчет стоимости до скидки: {expectedUnitPrice:0.##} × {expectedQty} = {expectedSubtotal:0.##}");
     }
 
     private static (bool IsValid, string? Reason) ValidateCalculationDiscount(
@@ -2339,6 +2695,7 @@ public static partial class EvidenceValidator
         decimal expectedFinal)
     {
         // 1. Check stated discount percentage in answer
+        var hasExpectedDiscountPercent = false;
         foreach (Match m in ClaimedDiscountPercentRegex().Matches(answer))
         {
             var pctStr = m.Groups["pct"].Value.Replace(',', '.');
@@ -2348,7 +2705,16 @@ public static partial class EvidenceValidator
                 {
                     return (false, $"Заявленный процент скидки {claimedPct:0.##}% не соответствует условиям в документе ({expectedDiscountPercent:0.##}%)");
                 }
+                hasExpectedDiscountPercent = true;
             }
+        }
+        if (!hasExpectedDiscountPercent)
+        {
+            var percentText = expectedDiscountPercent.ToString("0.##", CultureInfo.InvariantCulture);
+            hasExpectedDiscountPercent = Regex.IsMatch(
+                answer,
+                @"(?<![\d\.,])" + Regex.Escape(percentText) + @"\s*%(?!\d)",
+                RegexOptions.IgnoreCase);
         }
 
         // 2. Check discount multiplication formula: "98000 × (1 - 0.07) = 91260" or "98000 × 0.93 = 91140"
@@ -2428,7 +2794,13 @@ public static partial class EvidenceValidator
             }
         }
 
-        return (true, null);
+        if (hasExpectedDiscountPercent &&
+            ContainsValueToken(answer, expectedFinal.ToString("0.##", CultureInfo.InvariantCulture)))
+        {
+            return (true, null);
+        }
+
+        return (false, $"Ответ не содержит обязательный итог после скидки {expectedDiscountPercent:0.##}%: ожидается {expectedFinal:0.##}");
     }
 
     private static (bool IsValid, string? Reason) ValidateStockAvailability(

@@ -149,6 +149,16 @@ public sealed class RagPipeline : IRagPipeline
     {
         var prep = await PrepareExecutionAsync(request, cancellationToken).ConfigureAwait(false);
 
+        if (TableQueryExecutor.TryExecute(request.Question, prep.RagContext, out var deterministicAnswer))
+        {
+            prep.Stopwatch.Stop();
+            var deterministicResponse = FinalizeResponse(deterministicAnswer, prep, TimeSpan.Zero);
+            if (deterministicResponse.Diagnostics.RequiredCitationsSatisfied)
+            {
+                return deterministicResponse;
+            }
+        }
+
 #if DEBUG
         Console.Error.WriteLine("========== RAG DEBUG PROMPT ==========");
         Console.Error.WriteLine(prep.Prompt);
@@ -274,6 +284,18 @@ public sealed class RagPipeline : IRagPipeline
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var prep = await PrepareExecutionAsync(request, cancellationToken).ConfigureAwait(false);
+
+        if (TableQueryExecutor.TryExecute(request.Question, prep.RagContext, out var deterministicAnswer))
+        {
+            prep.Stopwatch.Stop();
+            var deterministicResponse = FinalizeResponse(deterministicAnswer, prep, TimeSpan.Zero);
+            if (deterministicResponse.Diagnostics.RequiredCitationsSatisfied)
+            {
+                yield return new RagTextDelta(deterministicResponse.Answer);
+                yield return new RagCompleted(deterministicResponse);
+                yield break;
+            }
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -635,7 +657,17 @@ public sealed class RagPipeline : IRagPipeline
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var combined = new List<RetrievalResult>();
 
-        // 1. Primary candidates (direct matches for the question)
+        // Reserve one slot for the best targeted result so a full primary topK
+        // cannot discard the entity lookup before reranking.
+        var bestEntityCandidate = secondary.FirstOrDefault(result =>
+            entityKeywords.Any(keyword =>
+                result.Chunk.Text.Contains(keyword, StringComparison.OrdinalIgnoreCase)));
+        if (bestEntityCandidate is not null && seen.Add(bestEntityCandidate.Chunk.ChunkId))
+        {
+            combined.Add(bestEntityCandidate);
+        }
+
+        // Primary candidates retain their original rank for the remaining slots.
         foreach (var r in primary)
         {
             if (seen.Add(r.Chunk.ChunkId))
@@ -644,7 +676,7 @@ public sealed class RagPipeline : IRagPipeline
             }
         }
 
-        // 2. Supplemental entity candidates (to guarantee entity-grounding presence)
+        // Supplemental entity candidates fill any remaining capacity.
         foreach (var r in secondary)
         {
             if (seen.Add(r.Chunk.ChunkId))
