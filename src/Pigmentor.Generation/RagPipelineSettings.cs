@@ -36,4 +36,21 @@ public sealed record RagPipelineSettings
         get => _contextOptions;
         set => _contextOptions = value ?? throw new ArgumentNullException(nameof(value));
     }
+
+    private HashSet<string> _excludedEntityProtocols = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "RS-485", "RS-232", "MODBUS-RTU", "MODBUS-TCP", "MODBUS"
+    };
+
+    /// <summary>
+    /// Protocol names or non-entity technical acronyms to exclude from targeted entity identifier retrieval.
+    /// Defaults to RS-485, RS-232, MODBUS-RTU, MODBUS-TCP, and MODBUS.
+    /// </summary>
+    public HashSet<string> ExcludedEntityProtocols
+    {
+        get => _excludedEntityProtocols;
+        set => _excludedEntityProtocols = value != null
+            ? new HashSet<string>(value, StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
 }

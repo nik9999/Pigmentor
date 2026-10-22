@@ -681,6 +681,50 @@ public sealed class RagPipelineTests
         Assert.True(fused[0].Score > fused[1].Score);
     }
 
+    [Theory]
+    [InlineData("ПИМФ.426439.004", "ПИМФ.426439.004")]
+    [InlineData("Что известно про ПИМФ.426439.004 РЭ?", "ПИМФ.426439.004")]
+    [InlineData("Характеристики АБВГ.123456.789-01 по ТУ", "АБВГ.123456.789-01")]
+    [InlineData("Сколько каналов у МВА8?", "МВА8")]
+    [InlineData("Какая периодичность обслуживания у ПX-400?", "ПX-400")]
+    [InlineData("Какая цена у TM-200 и PX-400?", "TM-200", "PX-400")]
+    [InlineData("Подключение модуля AI-8UI/D к питанию", "AI-8UI/D")]
+    public void ExtractEntityIdentifiers_ExtractsCyrillicGostAndAlphanumericDesignations(string question, params string[] expected)
+    {
+        var settings = new RagPipelineSettings();
+        var extracted = RagPipeline.ExtractEntityIdentifiers(question, settings.ExcludedEntityProtocols);
+
+        foreach (var exp in expected)
+        {
+            Assert.Contains(exp, extracted);
+        }
+    }
+
+    [Fact]
+    public void ExtractEntityIdentifiers_DoesNotMatchRussianHyphenatedProse()
+    {
+        var question = "Какой-то датчик из-за сбоя по-прежнему что-то не передает где-то на объекте?";
+        var settings = new RagPipelineSettings();
+        var extracted = RagPipeline.ExtractEntityIdentifiers(question, settings.ExcludedEntityProtocols);
+
+        Assert.Empty(extracted);
+    }
+
+    [Fact]
+    public void ExtractEntityIdentifiers_RespectsCustomConfiguredExcludedProtocols()
+    {
+        var question = "Прибор ПX-400 поддерживает CAN-BUS и RS-485";
+        var settings = new RagPipelineSettings();
+        settings.ExcludedEntityProtocols.Add("CAN-BUS");
+
+        var extracted = RagPipeline.ExtractEntityIdentifiers(question, settings.ExcludedEntityProtocols);
+
+        Assert.Single(extracted);
+        Assert.Equal("ПX-400", extracted[0]);
+        Assert.DoesNotContain("RS-485", extracted);
+        Assert.DoesNotContain("CAN-BUS", extracted);
+    }
+
     [Fact]
     public void TableQueryExecutor_EnumeratesRequestedCurrentRows()
     {

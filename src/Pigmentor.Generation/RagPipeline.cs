@@ -43,12 +43,16 @@ public sealed class RagPipeline : IRagPipeline
     private static readonly Regex StandaloneCitationLineRegex = new(
         @"(?m)^[\t ]*(?:\[S\d+\][\t ]*)+\r?(?:\n|$)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
-    private static readonly Regex IdentifierRegex = new(@"\b[A-Za-z]{2,}[A-Za-z0-9]*-[A-Za-z0-9/]+\b", RegexOptions.Compiled);
-
-    private static readonly HashSet<string> ExcludedEntityProtocols = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "RS-485", "RS-232", "MODBUS-RTU", "MODBUS-TCP", "MODBUS"
-    };
+    // GOST designations (e.g. ПИМФ.426439.004, АБВГ.123456.789-01),
+    // compact alphanumeric models (e.g. МВА8, MVA8),
+    // hyphenated alphanumeric models (e.g. PX-400, ПX-400, TM-200, AI-8UI/D),
+    // and protocol identifiers (e.g. RS-485, MODBUS-RTU).
+    private static readonly Regex IdentifierRegex = new(
+        @"\b(?:[A-Za-z\u0400-\u04FF]{2,6}\.[A-Za-z0-9\u0400-\u04FF][A-Za-z0-9\u0400-\u04FF./\-]*" +
+        @"|[A-Za-z]{2,}[A-Za-z0-9]*-[A-Za-z0-9/]+" +
+        @"|[A-Za-z\u0400-\u04FF]{2,}[A-Za-z0-9\u0400-\u04FF]*-[A-Za-z0-9\u0400-\u04FF/]*[0-9][A-Za-z0-9\u0400-\u04FF/]*" +
+        @"|[A-Za-z\u0400-\u04FF]{2,6}[0-9]+[A-Za-z0-9\u0400-\u04FF/]*)\b",
+        RegexOptions.Compiled);
 
     private readonly IRetriever _retriever;
     private readonly IChatGenerator _chat;
@@ -637,7 +641,12 @@ public sealed class RagPipeline : IRagPipeline
         }).TrimEnd();
     }
 
-    private static List<string> ExtractEntityIdentifiers(string text)
+    private List<string> ExtractEntityIdentifiers(string text)
+    {
+        return ExtractEntityIdentifiers(text, _settings.ExcludedEntityProtocols);
+    }
+
+    internal static List<string> ExtractEntityIdentifiers(string text, ISet<string>? excludedProtocols)
     {
         var list = new List<string>();
         if (string.IsNullOrWhiteSpace(text))
@@ -648,9 +657,11 @@ public sealed class RagPipeline : IRagPipeline
         var matches = IdentifierRegex.Matches(text);
         foreach (Match m in matches)
         {
-            if (!ExcludedEntityProtocols.Contains(m.Value) && !list.Contains(m.Value, StringComparer.OrdinalIgnoreCase))
+            var value = m.Value;
+            var isExcluded = excludedProtocols != null && excludedProtocols.Contains(value);
+            if (!isExcluded && !list.Contains(value, StringComparer.OrdinalIgnoreCase))
             {
-                list.Add(m.Value);
+                list.Add(value);
             }
         }
 
