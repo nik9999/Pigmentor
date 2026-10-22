@@ -257,7 +257,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
             {
                 cmd.CommandText = $@"
                     WITH matches AS (
-                        SELECT rowid, distance
+                        SELECT rowid, distance, embedding
                         FROM vec_chunks
                         WHERE rowid IN (SELECT row_id FROM chunks WHERE {filterSql})
                           AND embedding MATCH $query_vector
@@ -266,7 +266,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                     SELECT c.chunk_id, c.document_id, c.chunk_index, c.text, c.start_char_offset, c.end_char_offset,
                            c.silo, c.department, c.office, c.confidentiality_level, c.document_type, c.fiscal_year,
                            c.author, c.last_modified, c.title,
-                           m.distance
+                           m.distance, m.embedding
                     FROM matches m
                     JOIN chunks c ON c.row_id = m.rowid
                     ORDER BY m.distance;";
@@ -275,7 +275,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
             {
                 cmd.CommandText = @"
                     WITH matches AS (
-                        SELECT rowid, distance
+                        SELECT rowid, distance, embedding
                         FROM vec_chunks
                         WHERE embedding MATCH $query_vector
                           AND k = $topK
@@ -283,7 +283,7 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                     SELECT c.chunk_id, c.document_id, c.chunk_index, c.text, c.start_char_offset, c.end_char_offset,
                            c.silo, c.department, c.office, c.confidentiality_level, c.document_type, c.fiscal_year,
                            c.author, c.last_modified, c.title,
-                           m.distance
+                           m.distance, m.embedding
                     FROM matches m
                     JOIN chunks c ON c.row_id = m.rowid
                     ORDER BY m.distance;";
@@ -318,6 +318,17 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                 var lastModifiedStr = reader.GetString(13);
                 var title = reader.GetString(14);
                 var distance = reader.GetDouble(15);
+                ReadOnlyMemory<float>? vector = null;
+                if (!reader.IsDBNull(16))
+                {
+                    var bytes = (byte[])reader.GetValue(16);
+                    if (bytes != null && bytes.Length > 0)
+                    {
+                        var floats = new float[bytes.Length / sizeof(float)];
+                        Buffer.BlockCopy(bytes, 0, floats, 0, bytes.Length);
+                        vector = floats;
+                    }
+                }
 
                 var lastModified = DateOnly.TryParse(lastModifiedStr, CultureInfo.InvariantCulture, out var d) ? d : DateOnly.MinValue;
 
@@ -346,7 +357,11 @@ public sealed class SqliteVecStore : IVectorStore, IDisposable, IAsyncDisposable
                 // Higher score = better match in Pigmentor.
                 var score = 1.0 - distance;
 
-                results.Add(new RetrievalResult(chunk, score) { DenseScore = score });
+                results.Add(new RetrievalResult(chunk, score)
+                {
+                    DenseScore = score,
+                    Vector = vector
+                });
             }
 
             return results;

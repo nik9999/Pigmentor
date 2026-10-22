@@ -43,7 +43,7 @@ public sealed class RrfMerger
         ArgumentNullException.ThrowIfNull(lists);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(topK);
 
-        var fused = new Dictionary<string, (DocumentChunk Chunk, double FusedScore, double MaxOriginalScore, double? DenseScore, double? SparseScore)>(StringComparer.Ordinal);
+        var fused = new Dictionary<string, (DocumentChunk Chunk, double FusedScore, double MaxOriginalScore, double? DenseScore, double? SparseScore, ReadOnlyMemory<float>? Vector)>(StringComparer.Ordinal);
 
         foreach (var list in lists)
         {
@@ -76,12 +76,13 @@ public sealed class RrfMerger
                     }
 
                     var maxOrig = Math.Max(existing.MaxOriginalScore, item.Score);
+                    var vector = existing.Vector ?? item.Vector;
 
-                    fused[key] = (existing.Chunk, existing.FusedScore + contribution, maxOrig, dense, sparse);
+                    fused[key] = (existing.Chunk, existing.FusedScore + contribution, maxOrig, dense, sparse, vector);
                 }
                 else
                 {
-                    fused[key] = (item.Chunk, contribution, item.Score, item.DenseScore, item.SparseScore);
+                    fused[key] = (item.Chunk, contribution, item.Score, item.DenseScore, item.SparseScore, item.Vector);
                 }
             }
         }
@@ -95,7 +96,8 @@ public sealed class RrfMerger
             {
                 FusedScore = x.FusedScore,
                 DenseScore = x.DenseScore,
-                SparseScore = x.SparseScore
+                SparseScore = x.SparseScore,
+                Vector = x.Vector
             })];
     }
 }

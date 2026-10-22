@@ -59,12 +59,12 @@ public sealed class FusionService
     {
         var normA = NormalizeScores(a).ToList();
         var normB = NormalizeScores(b).ToList();
-        var fused = new Dictionary<string, (DocumentChunk Chunk, double Score, double? DenseScore, double? SparseScore)>(StringComparer.Ordinal);
+        var fused = new Dictionary<string, (DocumentChunk Chunk, double Score, double? DenseScore, double? SparseScore, ReadOnlyMemory<float>? Vector)>(StringComparer.Ordinal);
         for (int i = 0; i < normA.Count; i++)
         {
             var (chunk, score) = normA[i];
             var orig = a[i];
-            fused[chunk.ChunkId] = (chunk, WeightA * score, orig.DenseScore, orig.SparseScore);
+            fused[chunk.ChunkId] = (chunk, WeightA * score, orig.DenseScore, orig.SparseScore, orig.Vector);
         }
         for (int i = 0; i < normB.Count; i++)
         {
@@ -82,11 +82,12 @@ public sealed class FusionService
                 {
                     sparse = existing.SparseScore.HasValue ? Math.Max(existing.SparseScore.Value, orig.SparseScore.Value) : orig.SparseScore;
                 }
-                fused[chunk.ChunkId] = (existing.Chunk, existing.Score + WeightB * score, dense, sparse);
+                var vector = existing.Vector ?? orig.Vector;
+                fused[chunk.ChunkId] = (existing.Chunk, existing.Score + WeightB * score, dense, sparse, vector);
             }
             else
             {
-                fused[chunk.ChunkId] = (chunk, WeightB * score, orig.DenseScore, orig.SparseScore);
+                fused[chunk.ChunkId] = (chunk, WeightB * score, orig.DenseScore, orig.SparseScore, orig.Vector);
             }
         }
         return [.. fused.Values
@@ -97,7 +98,8 @@ public sealed class FusionService
             {
                 FusedScore = x.Score,
                 DenseScore = x.DenseScore,
-                SparseScore = x.SparseScore
+                SparseScore = x.SparseScore,
+                Vector = x.Vector
             })];
     }
 

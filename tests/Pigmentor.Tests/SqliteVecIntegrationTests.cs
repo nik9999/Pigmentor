@@ -116,6 +116,14 @@ public sealed class SqliteVecIntegrationTests : IDisposable
         Assert.True(results[1].Score > results[2].Score);
         Assert.InRange(results[0].Score, 0.99, 1.01);
         Assert.InRange(results[2].Score, -0.01, 0.01);
+
+        // Precomputed vectors carried directly from storage
+        Assert.NotNull(results[0].Vector);
+        Assert.True(results[0].Vector!.Value.Span.SequenceEqual(c1.Vector.Span));
+        Assert.NotNull(results[1].Vector);
+        Assert.True(results[1].Vector!.Value.Span.SequenceEqual(c2.Vector.Span));
+        Assert.NotNull(results[2].Vector);
+        Assert.True(results[2].Vector!.Value.Span.SequenceEqual(c3.Vector.Span));
     }
 
     [Fact]

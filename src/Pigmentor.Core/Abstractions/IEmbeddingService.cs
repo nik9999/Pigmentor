@@ -21,6 +21,17 @@ public interface IEmbeddingService
     Task<EmbeddedChunk> EmbedAsync(DocumentChunk chunk, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Embed document or passage text without retrieval query instruction prefixes.
+    /// Useful for reranking or candidate representation.
+    /// </summary>
+    async Task<ReadOnlyMemory<float>> EmbedDocumentAsync(string documentText, CancellationToken cancellationToken = default)
+    {
+        var dummyChunk = new DocumentChunk(string.Empty, string.Empty, 0, documentText, 0, documentText.Length, DocumentMetadata.Empty);
+        var embedded = await EmbedAsync(dummyChunk, cancellationToken).ConfigureAwait(false);
+        return embedded.Vector;
+    }
+
+    /// <summary>
     /// Embed a free-text query for retrieval. Distinct from
     /// <see cref="EmbedAsync(DocumentChunk, CancellationToken)"/> because retrieval
     /// models often require a query-specific instruction prefix; sending the document

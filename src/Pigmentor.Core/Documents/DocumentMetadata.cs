@@ -26,4 +26,8 @@ public sealed record DocumentMetadata(
     int FiscalYear = 0,
     string Author = "",
     DateOnly LastModified = default,
-    string Title = "");
+    string Title = "")
+{
+    /// <summary>An empty default metadata instance.</summary>
+    public static DocumentMetadata Empty { get; } = new(string.Empty, string.Empty);
+}

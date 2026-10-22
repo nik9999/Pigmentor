@@ -1168,6 +1168,40 @@ public sealed class RagPipelineTests
     }
 
     [Fact]
+    public async Task MmrReranker_UsesPrecomputedVectors_WithoutCallingEmbeddingService()
+    {
+        var metadata = new DocumentMetadata("doc", "", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
+
+        var chunkA1 = new DocumentChunk("doc#1", "doc", 1, "topic alpha", 0, 11, metadata);
+        var chunkA2 = new DocumentChunk("doc#2", "doc", 2, "topic alpha", 0, 11, metadata);
+        var chunkB = new DocumentChunk("doc#3", "doc", 3, "topic beta", 0, 10, metadata);
+
+        // Precomputed vectors carried from storage
+        var vecAlpha = new float[] { 1f, 0f };
+        var vecBeta = new float[] { 0f, 1f };
+
+        var candidates = new List<RetrievalResult>
+        {
+            new(chunkA1, 0.95) { Vector = vecAlpha },
+            new(chunkA2, 0.94) { Vector = vecAlpha },
+            new(chunkB, 0.80) { Vector = vecBeta }
+        };
+
+        var fakeEmbedder = new FakeEmbeddingService();
+        var mmrReranker = new MmrReranker(fakeEmbedder, lambda: 0.5);
+
+        var reranked = await mmrReranker.RerankAsync("query", candidates, topK: 2);
+
+        Assert.Equal(2, reranked.Count);
+        Assert.Equal("doc#1", reranked[0].Chunk.ChunkId);
+        Assert.Equal("doc#3", reranked[1].Chunk.ChunkId);
+
+        // Zero embedding inferences needed!
+        Assert.Equal(0, fakeEmbedder.EmbedCallCount);
+        Assert.Equal(0, fakeEmbedder.EmbedQueryCallCount);
+    }
+
+    [Fact]
     public void RussianPrompt_ContainsAllRequiredDirectives()
     {
         var meta = new DocumentMetadata("doc-1", "", "", "", "", "Ref", 0, "", DateOnly.MinValue, "Doc");
@@ -1475,9 +1509,12 @@ internal sealed class FakeEmbeddingService : IEmbeddingService
 {
     public string EmbeddingModel => "test-model";
     public int Dimensions => 2;
+    public int EmbedCallCount { get; private set; }
+    public int EmbedQueryCallCount { get; private set; }
 
     public Task<EmbeddedChunk> EmbedAsync(DocumentChunk chunk, CancellationToken cancellationToken = default)
     {
+        EmbedCallCount++;
         return Task.FromResult(new EmbeddedChunk(chunk, GetVector(chunk.Text), EmbeddingModel));
     }
 
@@ -1487,12 +1524,14 @@ internal sealed class FakeEmbeddingService : IEmbeddingService
     {
         await foreach (var chunk in chunks.WithCancellation(cancellationToken))
         {
+            EmbedCallCount++;
             yield return await EmbedAsync(chunk, cancellationToken);
         }
     }
 
     public Task<ReadOnlyMemory<float>> EmbedQueryAsync(string query, CancellationToken cancellationToken = default)
     {
+        EmbedQueryCallCount++;
         return Task.FromResult(GetVector(query));
     }
 

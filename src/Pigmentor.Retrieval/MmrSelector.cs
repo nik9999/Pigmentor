@@ -17,7 +17,8 @@ namespace Pigmentor.Retrieval;
 public readonly record struct MmrCandidate(
     DocumentChunk Chunk,
     ReadOnlyMemory<float> Vector,
-    double Relevance);
+    double Relevance,
+    RetrievalResult? OriginalResult = null);
 
 /// <summary>
 /// Maximal Marginal Relevance (Carbonell &amp; Goldstein, 1998) diversity
@@ -99,6 +100,13 @@ public static class MmrSelector
             remaining.RemoveAt(bestIndex);
         }
 
-        return [.. selected.Select(c => new RetrievalResult(c.Chunk, c.Relevance))];
+        return [.. selected.Select(c =>
+        {
+            if (c.OriginalResult != null)
+            {
+                return c.OriginalResult with { Score = c.Relevance };
+            }
+            return new RetrievalResult(c.Chunk, c.Relevance) { Vector = c.Vector };
+        })];
     }
 }

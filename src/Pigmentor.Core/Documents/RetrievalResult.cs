@@ -21,4 +21,7 @@ public sealed record RetrievalResult(DocumentChunk Chunk, double Score)
 
     /// <summary>Best original sparse similarity (e.g. BM25 score).</summary>
     public double? SparseScore { get; init; }
+
+    /// <summary>The dense embedding vector of the chunk, if carried from vector storage.</summary>
+    public ReadOnlyMemory<float>? Vector { get; init; }
 }

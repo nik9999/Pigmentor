@@ -6,6 +6,9 @@ namespace Pigmentor.Retrieval;
 /// <summary>
 /// Reranker that applies Maximal Marginal Relevance (MMR) diversity selection
 /// to balance relevance against redundancy among candidate chunks.
+/// Uses precomputed vectors from storage when available, or calculates
+/// document/passage embeddings via <see cref="IEmbeddingService.EmbedDocumentAsync"/>
+/// when missing.
 /// </summary>
 public sealed class MmrReranker : IReranker
 {
@@ -45,12 +48,20 @@ public sealed class MmrReranker : IReranker
         var mmrCandidates = new List<MmrCandidate>(candidates.Count);
         foreach (var candidate in candidates)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var vector = await _embeddingService.EmbedQueryAsync(candidate.Chunk.Text, cancellationToken).ConfigureAwait(false);
-            mmrCandidates.Add(new MmrCandidate(candidate.Chunk, vector, candidate.Score));
+            ReadOnlyMemory<float> vector;
+            if (candidate.Vector.HasValue)
+            {
+                vector = candidate.Vector.Value;
+            }
+            else
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                vector = await _embeddingService.EmbedDocumentAsync(candidate.Chunk.Text, cancellationToken).ConfigureAwait(false);
+            }
+
+            mmrCandidates.Add(new MmrCandidate(candidate.Chunk, vector, candidate.Score, candidate));
         }
 
         return MmrSelector.Select(mmrCandidates, topK, _lambda);
     }
 }
-

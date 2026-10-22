@@ -70,7 +70,11 @@ public sealed class InMemoryVectorStore : IVectorStore
             .Select(c =>
             {
                 var cos = CosineKernel.Cosine(queryVector.Span, c.Vector.Span);
-                return new RetrievalResult(c.Chunk, cos) { DenseScore = cos };
+                return new RetrievalResult(c.Chunk, cos)
+                {
+                    DenseScore = cos,
+                    Vector = c.Vector
+                };
             })
             .OrderByDescending(r => r.Score)
             .Take(topK)
