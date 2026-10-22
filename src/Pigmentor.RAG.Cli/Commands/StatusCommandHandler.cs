@@ -103,6 +103,21 @@ public sealed class StatusCommandHandler
         }
         _console.WriteLine($"  Dimensions:       {config.Embeddings.Dimensions}");
 
+        if (config.Reranker?.Enabled == true)
+        {
+            _console.WriteLine();
+            _console.WriteLine("Reranker:");
+            _console.WriteLine($"  Provider:         {config.Reranker.Provider}");
+            var resolvedModel = !string.IsNullOrWhiteSpace(config.Reranker.ModelPath)
+                ? _paths.ResolveApplicationPath(config.Reranker.ModelPath)
+                : "(none)";
+            var resolvedTok = !string.IsNullOrWhiteSpace(config.Reranker.TokenizerPath)
+                ? _paths.ResolveApplicationPath(config.Reranker.TokenizerPath)
+                : "(none)";
+            _console.WriteLine($"  Model Path:       {config.Reranker.ModelPath} (resolved: {resolvedModel})");
+            _console.WriteLine($"  Tokenizer Path:   {config.Reranker.TokenizerPath ?? "(none)"} (resolved: {resolvedTok})");
+        }
+
         if (check)
         {
             _console.WriteLine();
@@ -332,6 +347,42 @@ public sealed class StatusCommandHandler
                             }
                             allHealthy = false;
                         }
+                    }
+                }
+            }
+        }
+
+        // 3. Validate Reranker (if enabled)
+        if (config.Reranker?.Enabled == true)
+        {
+            if (string.Equals(config.Reranker.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
+            {
+                var modelPath = config.Reranker.ModelPath;
+                var tokenizerPath = config.Reranker.TokenizerPath;
+
+                if (string.IsNullOrWhiteSpace(modelPath) || string.IsNullOrWhiteSpace(tokenizerPath))
+                {
+                    _console.WriteLine("  Reranker (ONNX cross-encoder): FAILED (modelPath or tokenizerPath is missing in config).");
+                    allHealthy = false;
+                }
+                else
+                {
+                    var modelResolved = _paths.ResolveApplicationPath(modelPath);
+                    var tokResolved = _paths.ResolveApplicationPath(tokenizerPath);
+
+                    if (!File.Exists(modelResolved))
+                    {
+                        _console.WriteLine($"  Reranker (ONNX cross-encoder): FAILED (model file not found at '{modelResolved}').");
+                        allHealthy = false;
+                    }
+                    else if (!File.Exists(tokResolved))
+                    {
+                        _console.WriteLine($"  Reranker (ONNX cross-encoder): FAILED (tokenizer file not found at '{tokResolved}').");
+                        allHealthy = false;
+                    }
+                    else
+                    {
+                        _console.WriteLine("  Reranker (ONNX cross-encoder): OK");
                     }
                 }
             }

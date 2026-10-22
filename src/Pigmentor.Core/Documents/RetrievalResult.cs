@@ -24,4 +24,7 @@ public sealed record RetrievalResult(DocumentChunk Chunk, double Score)
 
     /// <summary>The dense embedding vector of the chunk, if carried from vector storage.</summary>
     public ReadOnlyMemory<float>? Vector { get; init; }
+
+    /// <summary>Cross-encoder reranker score (e.g. calibrated sigmoid relevance probability or logit).</summary>
+    public double? RerankerScore { get; init; }
 }

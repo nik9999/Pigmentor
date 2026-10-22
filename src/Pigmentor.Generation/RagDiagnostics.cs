@@ -30,7 +30,8 @@ public sealed record RagDiagnostics(
     bool HasInternalMarkerLeakage = false,
     double? MaxDenseScore = null,
     double? MaxSparseScore = null,
-    double? MaxFusedScore = null)
+    double? MaxFusedScore = null,
+    double? MaxRerankerScore = null)
 {
     /// <summary>Total execution time in milliseconds.</summary>
     public long TotalLatencyMs => (long)TotalLatency.TotalMilliseconds;

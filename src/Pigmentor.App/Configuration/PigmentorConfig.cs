@@ -19,6 +19,10 @@ public sealed class PigmentorConfig
 
     [JsonPropertyName("gigachat")]
     public GigaChatConfig? GigaChat { get; set; } = new();
+
+    [JsonPropertyName("reranker")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public RerankerConfig? Reranker { get; set; } = new();
 }
 
 public sealed class ChatConfig
@@ -63,4 +67,31 @@ public sealed class GigaChatConfig
 
     [JsonPropertyName("verifySsl")]
     public bool VerifySsl { get; set; } = true;
+}
+
+public sealed class RerankerConfig
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; } = false;
+
+    [JsonPropertyName("provider")]
+    public string Provider { get; set; } = "Onnx";
+
+    [JsonPropertyName("modelPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ModelPath { get; set; } = "models/bge-reranker-v2-m3/model.onnx";
+
+    [JsonPropertyName("tokenizerPath")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TokenizerPath { get; set; } = "models/bge-reranker-v2-m3/tokenizer.json";
+
+    [JsonPropertyName("maxPairsPerBatch")]
+    public int MaxPairsPerBatch { get; set; } = 16;
+
+    [JsonPropertyName("maxSequenceLength")]
+    public int MaxSequenceLength { get; set; } = 512;
+
+    [JsonPropertyName("minScore")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? MinScore { get; set; }
 }

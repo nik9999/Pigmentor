@@ -60,6 +60,24 @@ public sealed class ConfigCommandHandler
         _console.WriteLine("GigaChat:");
         _console.WriteLine($"  Scope:               {config.GigaChat?.Scope ?? "(none)"}");
         _console.WriteLine($"  Verify SSL:          {config.GigaChat?.VerifySsl ?? true}");
+        _console.WriteLine();
+        _console.WriteLine("Reranker:");
+        _console.WriteLine($"  Enabled:             {config.Reranker?.Enabled ?? false}");
+        _console.WriteLine($"  Provider:            {config.Reranker?.Provider ?? "(none)"}");
+        if (config.Reranker != null)
+        {
+            var resolvedModel = !string.IsNullOrWhiteSpace(config.Reranker.ModelPath)
+                ? _paths.ResolveApplicationPath(config.Reranker.ModelPath)
+                : "(none)";
+            var resolvedTok = !string.IsNullOrWhiteSpace(config.Reranker.TokenizerPath)
+                ? _paths.ResolveApplicationPath(config.Reranker.TokenizerPath)
+                : "(none)";
+            _console.WriteLine($"  Model Path:          {config.Reranker.ModelPath ?? "(none)"} (resolved: {resolvedModel})");
+            _console.WriteLine($"  Tokenizer Path:      {config.Reranker.TokenizerPath ?? "(none)"} (resolved: {resolvedTok})");
+            _console.WriteLine($"  Max Pairs/Batch:     {config.Reranker.MaxPairsPerBatch}");
+            _console.WriteLine($"  Max Sequence Length: {config.Reranker.MaxSequenceLength}");
+            _console.WriteLine($"  Min Score:           {config.Reranker.MinScore?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)"}");
+        }
 
         return 0;
     }

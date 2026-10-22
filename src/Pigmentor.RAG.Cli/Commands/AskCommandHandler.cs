@@ -355,6 +355,14 @@ public sealed class AskCommandHandler
         {
             sb.AppendLine(CultureInfo.InvariantCulture, $"  Max sparse score:     {diag.MaxSparseScore.Value:F3}");
         }
+        if (diag.MaxFusedScore.HasValue)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  Max fused score:      {diag.MaxFusedScore.Value:F4}");
+        }
+        if (diag.MaxRerankerScore.HasValue)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  Max reranker score:   {diag.MaxRerankerScore.Value:F4}");
+        }
         sb.AppendLine(CultureInfo.InvariantCulture, $"  Sources used:         {diag.ContextSourceCount}");
         sb.AppendLine(CultureInfo.InvariantCulture, $"  Valid citations:      {diag.ValidCitationCount}");
         sb.AppendLine(CultureInfo.InvariantCulture, $"  Invalid citations:    {diag.InvalidCitationCount}");

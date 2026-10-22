@@ -66,4 +66,37 @@ public sealed record RagPipelineSettings
         get => _minDenseScore;
         set => _minDenseScore = value;
     }
+
+    private double _minRerankerScore;
+
+    /// <summary>
+    /// Minimum calibrated reranker score threshold for candidate admission and abstention calibration.
+    /// Default is 0.0 (pass-through / disabled).
+    /// When positive (e.g. 0.35), candidates with RerankerScore below this threshold are pruned.
+    /// </summary>
+    public double MinRerankerScore
+    {
+        get => _minRerankerScore;
+        set => _minRerankerScore = value;
+    }
+
+    private int? _retrievalPoolSize;
+
+    /// <summary>
+    /// Initial candidate pool size to retrieve before filtering and reranking.
+    /// If null, defaults to the effective topK.
+    /// When greater than topK (e.g. 50), the retriever fetches a wide candidate pool for the reranker.
+    /// </summary>
+    public int? RetrievalPoolSize
+    {
+        get => _retrievalPoolSize;
+        set
+        {
+            if (value.HasValue && value.Value <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "RetrievalPoolSize must be positive.");
+            }
+            _retrievalPoolSize = value;
+        }
+    }
 }

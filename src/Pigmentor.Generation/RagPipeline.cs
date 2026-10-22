@@ -374,14 +374,15 @@ public sealed class RagPipeline : IRagPipeline
         var retrievalSw = Stopwatch.StartNew();
         var inferredFilter = request.MetadataFilter is null ? QueryScopeResolver.ResolveScope(request.Question) : null;
         var effectiveFilter = request.MetadataFilter ?? inferredFilter;
-        var retrievalRequest = new RetrievalRequest(request.Question, topK, effectiveFilter);
+        var retrievalPoolLimit = _settings.RetrievalPoolSize ?? topK;
+        var retrievalRequest = new RetrievalRequest(request.Question, retrievalPoolLimit, effectiveFilter);
         var candidatePool = await _retriever.RetrieveAsync(retrievalRequest, cancellationToken).ConfigureAwait(false);
 
         // Fallback: if an inferred scope yielded too few candidates (< topK / 2),
         // remove the inferred filter and repeat retrieval across the full corpus to avoid false-positive silo lock-in.
         if (request.MetadataFilter is null && inferredFilter is not null && candidatePool.Count < Math.Max(1, topK / 2))
         {
-            var fallbackPool = await _retriever.RetrieveAsync(new RetrievalRequest(request.Question, topK, MetadataFilter.All), cancellationToken).ConfigureAwait(false);
+            var fallbackPool = await _retriever.RetrieveAsync(new RetrievalRequest(request.Question, retrievalPoolLimit, MetadataFilter.All), cancellationToken).ConfigureAwait(false);
             if (fallbackPool.Count > candidatePool.Count)
             {
                 candidatePool = fallbackPool;
@@ -396,7 +397,7 @@ public sealed class RagPipeline : IRagPipeline
             var entityLists = new List<IReadOnlyList<RetrievalResult>>();
             foreach (var identifier in identifiers)
             {
-                var entityReq = new RetrievalRequest(identifier, topK, effectiveFilter);
+                var entityReq = new RetrievalRequest(identifier, retrievalPoolLimit, effectiveFilter);
                 var entityRes = await _retriever.RetrieveAsync(entityReq, cancellationToken).ConfigureAwait(false);
                 if (entityRes.Count > 0)
                 {
@@ -406,7 +407,7 @@ public sealed class RagPipeline : IRagPipeline
 
             if (entityLists.Count > 0)
             {
-                candidatePool = MergeEntityCandidates(candidatePool, entityLists, topK);
+                candidatePool = MergeEntityCandidates(candidatePool, entityLists, retrievalPoolLimit);
             }
         }
 
@@ -425,13 +426,19 @@ public sealed class RagPipeline : IRagPipeline
                 .ToList();
         }
 
-        // 3. Reranker receives candidates that satisfied mandatory filtering
-        var rerankedCandidates = await _reranker.RerankAsync(
+        // 3. Reranker receives candidates that satisfied mandatory filtering and ranks topK
+        var rawRerankedCandidates = await _reranker.RerankAsync(
             request.Question,
             filteredCandidates,
-            filteredCandidates.Count,
+            topK,
             cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
+
+        var rerankedCandidates = _settings.MinRerankerScore > 0.0
+            ? rawRerankedCandidates
+                .Where(c => !c.RerankerScore.HasValue || c.RerankerScore.Value >= _settings.MinRerankerScore)
+                .ToList()
+            : rawRerankedCandidates;
 
         // 4. Context builder enforces token budget, accounting for prompt instructions, delimiters, and question overhead (§3, §4, §5)
         var basePrompt = RagPromptBuilder.BuildPrompt(request.Question, RagContext.Empty);
@@ -469,7 +476,7 @@ public sealed class RagPipeline : IRagPipeline
             Question: request.Question,
             CandidatePool: candidatePool,
             FilteredCandidates: filteredCandidates,
-            RerankedCandidates: rerankedCandidates,
+            RerankedCandidates: rawRerankedCandidates,
             RagContext: ragContext,
             Prompt: prompt,
             PromptTokenCount: promptTokenCount,
@@ -533,6 +540,7 @@ public sealed class RagPipeline : IRagPipeline
         double? maxDense = null;
         double? maxSparse = null;
         double? maxFused = null;
+        double? maxReranker = null;
         var candidatesToInspect = prep.CandidatePool.Count > 0 ? prep.CandidatePool : prep.FilteredCandidates;
         if (candidatesToInspect.Count > 0)
         {
@@ -549,6 +557,21 @@ public sealed class RagPipeline : IRagPipeline
                 if (!maxFused.HasValue || c.FusedScore > maxFused.Value)
                 {
                     maxFused = c.FusedScore;
+                }
+                if (c.RerankerScore.HasValue && (!maxReranker.HasValue || c.RerankerScore.Value > maxReranker.Value))
+                {
+                    maxReranker = c.RerankerScore.Value;
+                }
+            }
+        }
+
+        if (prep.RerankedCandidates.Count > 0)
+        {
+            foreach (var c in prep.RerankedCandidates)
+            {
+                if (c.RerankerScore.HasValue && (!maxReranker.HasValue || c.RerankerScore.Value > maxReranker.Value))
+                {
+                    maxReranker = c.RerankerScore.Value;
                 }
             }
         }
@@ -571,7 +594,8 @@ public sealed class RagPipeline : IRagPipeline
                 HasInternalMarkerLeakage: true,
                 MaxDenseScore: maxDense,
                 MaxSparseScore: maxSparse,
-                MaxFusedScore: maxFused);
+                MaxFusedScore: maxFused,
+                MaxRerankerScore: maxReranker);
 
             return new RagResponse(
                 "Ответ отклонен: обнаружена утечка внутренних служебных маркеров контекста.",
@@ -636,7 +660,8 @@ public sealed class RagPipeline : IRagPipeline
             HasInternalMarkerLeakage: false,
             MaxDenseScore: maxDense,
             MaxSparseScore: maxSparse,
-            MaxFusedScore: maxFused);
+            MaxFusedScore: maxFused,
+            MaxRerankerScore: maxReranker);
 
         return new RagResponse(answer, citations, prep.RagContext.Sources, diagnostics);
     }

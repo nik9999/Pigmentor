@@ -82,11 +82,41 @@ public sealed class PigmentorAppRuntime : IDisposable, IAsyncDisposable
 
         // Use Hosting baseline
         var builder = services.AddPigmentor();
-        services.Replace(ServiceDescriptor.Singleton<IReranker, TableAwareLexicalReranker>());
+
+        // 1. Reranker setup: Cross-encoder (bge-reranker-v2-m3) if enabled, otherwise TableAwareLexicalReranker
+        if (config.Reranker?.Enabled == true)
+        {
+            var rerankerModelPath = paths.ResolveApplicationPath(config.Reranker.ModelPath ?? "models/bge-reranker-v2-m3/model.onnx");
+            var rerankerTokenizerPath = paths.ResolveApplicationPath(
+                config.Reranker.TokenizerPath ?? config.Embeddings?.TokenizerPath ?? "models/bge-reranker-v2-m3/tokenizer.json");
+
+            services.Replace(ServiceDescriptor.Singleton<IReranker>(sp =>
+            {
+                return new OnnxCrossEncoderReranker(
+                    rerankerModelPath,
+                    rerankerTokenizerPath,
+                    maxPairsPerBatch: config.Reranker.MaxPairsPerBatch > 0 ? config.Reranker.MaxPairsPerBatch : 16,
+                    maxSequenceLength: config.Reranker.MaxSequenceLength > 0 ? config.Reranker.MaxSequenceLength : 512,
+                    applySigmoid: true);
+            }));
+        }
+        else
+        {
+            services.Replace(ServiceDescriptor.Singleton<IReranker, TableAwareLexicalReranker>());
+        }
+
         services.Configure<RagPipelineSettings>(options =>
         {
             options.Budget = new ContextBudget(MaxTotalTokens: 8192, ReservedOutputTokens: 1024);
             options.DefaultTopK = 8;
+            if (config.Reranker?.Enabled == true)
+            {
+                options.RetrievalPoolSize = Math.Max(50, options.DefaultTopK * 4);
+                if (config.Reranker.MinScore.HasValue)
+                {
+                    options.MinRerankerScore = config.Reranker.MinScore.Value;
+                }
+            }
         });
 
         // 2. Chat Client setup

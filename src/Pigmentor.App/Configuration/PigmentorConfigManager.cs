@@ -34,6 +34,7 @@ public sealed class PigmentorConfigManager
         "chat",
         "embeddings",
         "gigachat",
+        "reranker",
         "storage" // Supported for graceful upgrade from older configurations
     };
 
@@ -63,6 +64,17 @@ public sealed class PigmentorConfigManager
     {
         "scope",
         "verifyssl"
+    };
+
+    private static readonly HashSet<string> AllowedRerankerProperties = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "enabled",
+        "provider",
+        "modelpath",
+        "tokenizerpath",
+        "maxpairsperbatch",
+        "maxsequencelength",
+        "minscore"
     };
 
     private readonly IPigmentorAppPaths _paths;
@@ -299,6 +311,51 @@ public sealed class PigmentorConfigManager
                 config.GigaChat.VerifySsl = verifySsl;
                 break;
 
+            case "reranker.enabled":
+                if (!bool.TryParse(value, out var rEnabled))
+                {
+                    throw new ArgumentException("reranker.enabled must be 'true' or 'false'.", nameof(value));
+                }
+                config.Reranker ??= new RerankerConfig();
+                config.Reranker.Enabled = rEnabled;
+                break;
+            case "reranker.provider":
+                config.Reranker ??= new RerankerConfig();
+                config.Reranker.Provider = value;
+                break;
+            case "reranker.modelpath":
+                config.Reranker ??= new RerankerConfig();
+                config.Reranker.ModelPath = value;
+                break;
+            case "reranker.tokenizerpath":
+                config.Reranker ??= new RerankerConfig();
+                config.Reranker.TokenizerPath = value;
+                break;
+            case "reranker.maxpairsperbatch":
+                if (!int.TryParse(value, out var batch) || batch <= 0)
+                {
+                    throw new ArgumentException("reranker.maxpairsperbatch must be a positive integer.", nameof(value));
+                }
+                config.Reranker ??= new RerankerConfig();
+                config.Reranker.MaxPairsPerBatch = batch;
+                break;
+            case "reranker.maxsequencelength":
+                if (!int.TryParse(value, out var seqLen) || seqLen <= 0)
+                {
+                    throw new ArgumentException("reranker.maxsequencelength must be a positive integer.", nameof(value));
+                }
+                config.Reranker ??= new RerankerConfig();
+                config.Reranker.MaxSequenceLength = seqLen;
+                break;
+            case "reranker.minscore":
+                if (!double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var minSc) || minSc < 0)
+                {
+                    throw new ArgumentException("reranker.minscore must be a non-negative number.", nameof(value));
+                }
+                config.Reranker ??= new RerankerConfig();
+                config.Reranker.MinScore = minSc;
+                break;
+
             default:
                 throw new ArgumentException($"Unknown configuration setting: '{key}'.", nameof(key));
         }
@@ -447,6 +504,58 @@ public sealed class PigmentorConfigManager
             }
         }
 
+        // Reranker
+        if (config.Reranker?.Enabled == true)
+        {
+            if (string.IsNullOrWhiteSpace(config.Reranker.Provider))
+            {
+                errors.Add("Reranker provider cannot be empty when enabled (supported: 'Onnx').");
+            }
+            else if (!string.Equals(config.Reranker.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add($"Unsupported reranker provider '{config.Reranker.Provider}'. Supported providers: 'Onnx'.");
+            }
+
+            if (string.Equals(config.Reranker.Provider, "Onnx", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(config.Reranker.ModelPath))
+                {
+                    errors.Add("Reranker modelPath must be specified when provider is 'Onnx'.");
+                }
+                else if (validateFilesExist)
+                {
+                    var resolvedModel = resolver.ResolveApplicationPath(config.Reranker.ModelPath);
+                    if (!File.Exists(resolvedModel))
+                    {
+                        errors.Add($"ONNX reranker model not found:\n  configured: {config.Reranker.ModelPath}\n  resolved:   {resolvedModel}");
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(config.Reranker.TokenizerPath))
+                {
+                    errors.Add("Reranker tokenizerPath must be specified when provider is 'Onnx'.");
+                }
+                else if (validateFilesExist)
+                {
+                    var resolvedTokenizer = resolver.ResolveApplicationPath(config.Reranker.TokenizerPath);
+                    if (!File.Exists(resolvedTokenizer))
+                    {
+                        errors.Add($"ONNX reranker tokenizer not found:\n  configured: {config.Reranker.TokenizerPath}\n  resolved:   {resolvedTokenizer}");
+                    }
+                }
+            }
+
+            if (config.Reranker.MaxPairsPerBatch <= 0)
+            {
+                errors.Add("Reranker maxPairsPerBatch must be a positive integer.");
+            }
+
+            if (config.Reranker.MaxSequenceLength <= 0)
+            {
+                errors.Add("Reranker maxSequenceLength must be a positive integer.");
+            }
+        }
+
         return errors;
     }
 
@@ -478,6 +587,7 @@ public sealed class PigmentorConfigManager
                     "chat" => AllowedChatProperties,
                     "embeddings" => AllowedEmbeddingsProperties,
                     "gigachat" => AllowedGigaChatProperties,
+                    "reranker" => AllowedRerankerProperties,
                     "storage" => AllowedStorageProperties,
                     _ => null
                 };
