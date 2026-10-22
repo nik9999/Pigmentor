@@ -38,8 +38,7 @@ public sealed class DenseRetriever : IRetriever
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var effectiveFilter = request.Filter ?? QueryScopeResolver.ResolveScope(request.Query);
         var queryVec = await _embeddings.EmbedQueryAsync(request.Query, cancellationToken).ConfigureAwait(false);
-        return await _store.SearchAsync(queryVec, request.TopK, effectiveFilter, cancellationToken).ConfigureAwait(false);
+        return await _store.SearchAsync(queryVec, request.TopK, request.Filter, cancellationToken).ConfigureAwait(false);
     }
 }

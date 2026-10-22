@@ -102,6 +102,27 @@ public class RetrievalPropagationTests
     }
 
     [Fact]
+    public async Task DenseRetriever_DoesNotInferScope_PassesRequestFilterDirectlyToStore()
+    {
+        var recordingStore = new RecordingVectorStore();
+        var fakeEmbedder = new FakeEmbeddingService();
+        var dense = new DenseRetriever(fakeEmbedder, recordingStore);
+
+        // When request has no filter, even if the query text mentions catalog keywords,
+        // DenseRetriever must NOT infer scope — it must pass null filter directly to the store.
+        await dense.RetrieveAsync("Какая модель имеет минимальную цену?", 4);
+
+        Assert.Null(recordingStore.LastFilter);
+        Assert.Equal(4, recordingStore.LastTopK);
+
+        // When request explicitly specifies a filter, it must be forwarded as-is.
+        var customFilter = MetadataFilter.Where(m => m.Department == "Engineering");
+        await dense.RetrieveAsync(new RetrievalRequest("Какая модель имеет минимальную цену?", 4, customFilter));
+
+        Assert.Same(customFilter, recordingStore.LastFilter);
+    }
+
+    [Fact]
     public async Task TableAwareLexicalReranker_PromotesRequestedCurrentTable()
     {
         var meta = CreateMeta("mds", "engineering") with { Silo = "technical-docs" };
@@ -464,5 +485,28 @@ public class RetrievalPropagationTests
 
         public Task<ReadOnlyMemory<float>> EmbedQueryAsync(string query, CancellationToken cancellationToken = default) =>
             Task.FromResult<ReadOnlyMemory<float>>(DefaultVector);
+    }
+
+    private sealed class RecordingVectorStore : IVectorStore
+    {
+        public string CollectionName => "test-collection";
+        public MetadataFilter? LastFilter { get; private set; }
+        public int LastTopK { get; private set; }
+
+        public Task EnsureCollectionExistsAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<IReadOnlyList<RetrievalResult>> SearchAsync(
+            ReadOnlyMemory<float> queryVector,
+            int topK,
+            MetadataFilter? filter = null,
+            CancellationToken cancellationToken = default)
+        {
+            LastFilter = filter;
+            LastTopK = topK;
+            return Task.FromResult<IReadOnlyList<RetrievalResult>>([]);
+        }
+
+        public Task UpsertAsync(IEnumerable<EmbeddedChunk> chunks, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task DeleteAsync(IEnumerable<string> chunkIds, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 }
